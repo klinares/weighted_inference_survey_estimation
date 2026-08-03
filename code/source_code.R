@@ -678,8 +678,6 @@ check_factors <- function(factors, items) {
   invisible(TRUE)
 }
 
-# Same estimator and weighting as fit_cfa, so the search and the final model 
-#   are on the same footing
 fit_efa <- function(k, w, items, data) {
   d = mutate(data, .w = w)
   try(efa(data = select(d, all_of(items), .w), nfactors = k, ordered = items,

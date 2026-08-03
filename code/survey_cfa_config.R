@@ -104,6 +104,7 @@ cfg <- list(
   min_items = min_items,
 
   k_range = 1:4,
+  n_pa = 100,
   n_factors = 2,
   cfa_factors = cfa_factors,
   cfa_free = NULL, # ex.  "armed_forces ~~ police"

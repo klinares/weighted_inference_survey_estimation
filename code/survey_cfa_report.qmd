@@ -25,6 +25,7 @@ execute:
 #| include: false
 pacman::p_load(lavaan, matrixStats, clue, survey, furrr, kableExtra,
                viridis, here, glue, sjlabelled, haven, knitr, tidyverse)
+
 source("source_code.R")
 source("survey_cfa_config.R")
 init_parallel(cfg)
@@ -67,7 +68,20 @@ dat <- cfg$data
 w_vec <- dat[[cfg$weight]]
 n_obs <- nrow(dat)
 items <- cfg$items
-n_eff <- sum(w_vec)^2 / sum(w_vec^2)
+
+design <- build_rep_design(dat, cfg)
+des <- design$des
+rep_des <- design$rep_des
+nu <- degf(rep_des)
+crit <- qt(0.975, nu)
+
+# Effective sample size for the parallel analysis threshold. The Kish formula
+# sees only the weights; the item-mean design effect sees the clustering too,
+# which is what actually costs this survey information.
+gdeff <- median(as.numeric(deff(svymean(reformulate(items), rep_des,
+                                        deff = "replace", na.rm = TRUE))),
+                na.rm = TRUE)
+n_eff <- n_obs / gdeff
 
 design <- build_rep_design(dat, cfg)
 des <- design$des
@@ -77,7 +91,7 @@ crit <- qt(0.975, nu)
 
 glue("{length(items)} items, {n_obs} cases. ",
      "Design: {ncol(rep_des$repweights)} replicates, {nu} degrees of freedom. ",
-     "Weights: CV = {round(sd(w_vec) / mean(w_vec), 3)}, ",
+     "Weights: \nCV = {round(sd(w_vec) / mean(w_vec), 3)}, ",
      "unequal weighting effect = {round(1 + (sd(w_vec) / mean(w_vec))^2, 2)}.")
 
 ```
@@ -100,7 +114,8 @@ Nothing here selects the number of factors. The report produces evidence and the
 
 Three pieces of evidence, and they answer different questions.
 
-**Eigenvalues** say how much shared variance each successive factor accounts for. The conventional check is Horn's parallel analysis: simulate data with no factor structure at all, compute its eigenvalues, and retain factors whose real eigenvalue clears the simulated one. We run that simulation at the *effective* sample size rather than the achieved one, because under clustering a survey of 1,600 carries less information than 1,600 independent observations and the comparison threshold would otherwise be set too low. The eigenvalues also carry confidence intervals from the replicate design, which a bare scree plot cannot offer.
+**Eigenvalues** say how much shared variance each successive factor accounts for. The conventional check is Horn's parallel analysis: simulate data with no factor structure at all, compute its eigenvalues, and retain factors whose real eigenvalue clears the simulated one. Two adjustments matter here. The simulation runs at an effective sample size that divides the achieved one by the design effect of the item means, because a clustered survey of 1,600 carries less information than 1,600 independent observations and the threshold would otherwise sit too low. And the simulated data are cut into the same response categories as the real items and read back with the same polychoric estimator, because polychoric correlations are noisier than ordinary ones and a threshold built from continuous random data would be too easy to clear. The eigenvalues also carry confidence intervals from the replicate design, which a bare scree plot cannot offer.
+
 
 **Admissibility** comes first, because it is a yes or no. A residual variance is the part of an item the factors do not explain, and it cannot be negative. When one comes out negative the solution is impossible rather than merely poor, and the usual cause is asking for more factors than the battery supports: one of them splits off and absorbs more than all of an item's variance. Such a solution is out regardless of how good its fit indices look, and the fit indices will look good, because an inadmissible solution is one that has fitted the sample too closely.
 
@@ -112,10 +127,23 @@ Three pieces of evidence, and they answer different questions.
 R <- wcor(w_vec, items, dat)
 eig_hat <- eigen(R, only.values = TRUE)$values
 
+# Parallel analysis has to compare like with like. Polychoric correlations are
+# noisier than Pearson ones, so a threshold built from continuous random data
+# sits too low and the comparison leans toward retaining. Each draw is cut at
+# the observed category proportions and read back with the same estimator.
+cuts <- map(items, function(it)
+  qnorm(head(cumsum(proportions(table(dat[[it]]))), -1)))
+
 set.seed(cfg$seed)
-pa <- map(1:200, function(i)
-  eigen(cor(matrix(rnorm(round(n_eff) * length(items)),
-                   round(n_eff), length(items))), only.values = TRUE)$values) |>
+pa <- future_map(1:cfg$n_pa, function(i) {
+  Z = matrix(rnorm(round(n_eff) * length(items)), round(n_eff))
+  D = map2(seq_along(items), cuts,
+           function(j, k) findInterval(Z[, j], k) + 1L) |>
+    set_names(items) |>
+    as_tibble()
+  eigen(wcor(rep(1, nrow(D)), items, D), only.values = TRUE)$values
+}, .options = furrr_options(seed = NULL,
+     packages = c("lavaan", "dplyr", "purrr", "tibble"))) |>
   do.call(what = rbind)
 
 eig_tbl <- tibble(factor = seq_along(items), eigenvalue = eig_hat,
@@ -132,7 +160,8 @@ eig_tbl |>
   filter(factor <= max(cfg$k_range)) |>
   mutate(across(where(is.numeric), function(x) round(x, 3))) |>
   lca_table(align = "r",
-            caption = "Design-weighted eigenvalues against a random-data threshold at the effective sample size.")
+            caption = "Design-weighted eigenvalues against a random-data 
+            threshold at the effective sample size.")
 ```
 
 ```{r efa-search}
@@ -143,22 +172,22 @@ efa_fits <- future_map(cfg$k_range, function(k) fit_efa(k, w_vec, items, dat),
 Wm <- weights(rep_des, type = "analysis")
 
 efa_tbl <- map2(cfg$k_range, efa_fits, function(k, f) {
-  fit <- as_fit(f)
-  if (inherits(fit, "try-error")) return(tibble(k = k, converged = FALSE))
-  fm <- fitMeasures(fit)
-  pick <- function(nm) if (nm %in% names(fm)) as.numeric(fm[nm]) else NA_real_
-  ref <- efa_pattern(f)
-  reps <- future_map(seq_len(ncol(Wm)),
-                     function(r) efa_pattern(fit_efa(k, Wm[, r], items, dat)),
-                     .options = furrr_options(seed = NULL,
-                       packages = c("lavaan", "dplyr")))
-  ok <- !map_lgl(reps, is.null)
+  fit = as_fit(f)
+  if(inherits(fit, "try-error")) return(tibble(k = k, converged = FALSE))
+  fm = fitMeasures(fit)
+  pick = function(nm) if(nm %in% names(fm)) as.numeric(fm[nm]) else NA_real_
+  ref = efa_pattern(f)
+  reps = future_map(seq_len(ncol(Wm)),
+                    function(r) efa_pattern(fit_efa(k, Wm[, r], items, dat)),
+                    .options = furrr_options(seed = NULL,
+                      packages = c("lavaan", "dplyr")))
+  ok = !map_lgl(reps, is.null)
   tibble(k = k, rep_ok = sum(ok),
          admissible = lavInspect(fit, "post.check"),
          min_resid = min(diag(lavInspect(fit, "theta"))),
          cfi = pick("cfi.scaled"), rmsea = pick("rmsea.scaled"),
          srmr = pick("srmr"),
-         stability = mean(map_lgl(reps, function(p) !is.null(p) && 
+         stability = mean(map_lgl(reps, function(p) !is.null(p) &&
                                     identical(p, ref))))
 }) |>
   list_rbind()
@@ -175,9 +204,6 @@ Successive solutions are nested, so a likelihood ratio test can ask whether the 
 # A generalized design effect for this battery, taken from the item means. It is
 # available before the model is fitted, which the loading design effects are not,
 # and it costs one svymean call.
-gdeff <- median(as.numeric(deff(svymean(reformulate(items), rep_des,
-                                        deff = "replace", na.rm = TRUE))),
-                na.rm = TRUE)
 
 lrt_tbl <- map(head(cfg$k_range, -1), function(k) {
   a <- as_fit(efa_fits[[which(cfg$k_range == k)]])
@@ -197,11 +223,15 @@ lrt_tbl |>
   mutate(across(c(chisq), function(x) round(x, 1)),
          across(starts_with("p_"), function(x) sprintf("%.4f", x))) |>
   lca_table(align = "lrrrr",
-            col.names = c("Comparison", "Chi-square", "df", "p naive", "p adjusted"),
+            col.names = c("Comparison", "Chi-square", "df", "p naive", "p 
+                          adjusted"),
             widths = fit_widths(5, first = 1.6), font_size = 8,
-            caption = paste0("Nested comparison of successive factor solutions, naive and design-adjusted (deff ",
+            caption = paste0("Nested comparison of successive factor solutions, 
+                             naive and design-adjusted (deff ",
                              round(gdeff, 2),
-                             "), a first-order approximation to a Rao-Scott correction. Read it as a guide, not an exact test."))
+                             "), a first-order approximation to a Rao-Scott 
+                             correction. Read it as a guide, not an exact test.")
+            )
 ```
 
 ```{r fig-search}
@@ -278,7 +308,8 @@ fm <- fitMeasures(fit_w)
 
 glue("Converged: {lavInspect(fit_w, 'converged')}. ",
      "{fm['npar']} free parameters on {n_obs} cases. ",
-     "Robust CFI {round(fm['cfi.scaled'], 3)}, TLI {round(fm['tli.scaled'], 3)}, ",
+     "Robust CFI {round(fm['cfi.scaled'], 3)}, 
+     TLI {round(fm['tli.scaled'], 3)}, ",
      "RMSEA {round(fm['rmsea.scaled'], 3)}, SRMR {round(fm['srmr'], 3)}.")
 ```
 
@@ -328,7 +359,8 @@ param_tbl |>
             `SE lavaan` = sprintf("%.4f", se_model),
             Deff = sprintf("%.2f", deff)) |>
   lca_table(align = "lrrrrr", widths = fit_widths(6, first = 1.8), font_size = 7,
-            caption = "Loadings with design-based intervals, and the design effect on each.")
+            caption = "Loadings with design-based intervals, and the design 
+            effect on each.")
 
 ```
 
@@ -363,7 +395,8 @@ param_tbl |>
   facet_wrap(~ factor, scales = "free_y") +
   scale_fill_manual(values = c(`FALSE` = viridisLite::viridis(1, begin = 0.55),
                                `TRUE` = "grey75"),
-                    labels = c(`FALSE` = "estimated", `TRUE` = "anchor, fixed at 1")) +
+                    labels = c(`FALSE` = "estimated", `TRUE` = "anchor, 
+                               fixed at 1")) +
   labs(x = "Loading (marker scale)", y = NULL, fill = NULL) +
   theme_lca()
 ```
@@ -453,7 +486,8 @@ modindices(fit_w, sort = TRUE, minimum.value = 10) |>
   transmute(`Item A` = lhs, `Item B` = rhs,
             MI = sprintf("%.1f", mi), EPC = sprintf("%.3f", epc)) |>
   lca_table(align = "llrr", widths = c("12em", "12em", "6em", "6em"),
-            caption = "Ten largest modification indices for residual covariances. A ranking, not a test.")
+            caption = "Ten largest modification indices for residual 
+            covariances. A ranking, not a test.")
 ```
 
 # Naming the factor {#sec-labeling}
@@ -503,7 +537,8 @@ if (file.exists(lab_path)) {
 }
 
 lca_table(factor_labels, widths = c("5em", "10em", "19em", "7em"),
-          caption = "Factor names in use. Drafts: verify each against the loading table above before quoting it.")
+          caption = "Factor names in use. Drafts: verify each against the 
+          loading table above before quoting it.")
 ```
 
 # Scoring respondents {#sec-scoring}
@@ -574,15 +609,19 @@ crit_s <- qt(0.975, degf(rep_des_s))
 rep_des_reg <- build_rep_design(scored_reg, cfg)$rep_des
 
 lam <- unclass(lavInspect(fit_w, "std")$lambda)
-anchors <- map_chr(fnames, function(fn) rownames(lam)[which.max(abs(lam[, fn]))])
+anchors <- map_chr(fnames, function(fn) rownames(lam)[which.max(abs(lam[, fn]))]
+                   )
 names(anchors) <- fnames
 
 tibble(Factor = fnames, Label = factor_labels$Label,
        Mean = round(colMeans(FS), 3), SD = round(apply(FS, 2, sd), 3),
        Indicator = anchors,
-       Loading = round(map_dbl(fnames, function(fn) lam[anchors[[fn]], fn]), 2)) |>
-  lca_table(align = "llrrlr", widths = fit_widths(6, first = 1.6), font_size = 8,
-            caption = glue("Factor positions across the {nrow(scored)} scored respondents."))
+       Loading = round(map_dbl(fnames, function(fn) lam[anchors[[fn]], fn]),
+                       2)) |>
+  lca_table(align = "llrrlr", widths = fit_widths(6, first = 1.6),
+            font_size = 8,
+            caption = glue("Factor positions across the {nrow(scored)} scored
+                           respondents."))
 ```
 
 # Domain estimation {#sec-domains}
@@ -675,11 +714,14 @@ wide_gap <- domain |>
   pivot_wider(names_from = estimator, values_from = c(p, se))
 
 glue("Weighting moves the factor means by a median of ",
-     "{round(median(abs(wide_gap$`p_Design-based` - wide_gap$p_Unweighted)), 3)}; ",
+     "{round(median(abs(wide_gap$`p_Design-based` - 
+     wide_gap$p_Unweighted)), 3)}; ",
      "unshrinking them moves a further ",
-     "{round(median(abs(wide_gap$p_Bartlett - wide_gap$`p_Design-based`)), 3)}. ",
+     "{round(median(abs(wide_gap$p_Bartlett - 
+     wide_gap$`p_Design-based`)), 3)}. ",
      "Design-based intervals are a median of ",
-     "{round(median(wide_gap$`se_Design-based` / wide_gap$se_Unweighted), 2)} ",
+     "{round(median(wide_gap$`se_Design-based` / 
+     wide_gap$se_Unweighted), 2)} ",
      "times the naive ones.")
 ```
 
@@ -702,7 +744,8 @@ walk(cfg$aux, function(v) {
     lca_table(align = str_c("ll", strrep("r", length(lv))),
               widths = fit_widths(2 + length(lv), first = 2.2), font_size = 7,
               label = paste0("dom-", str_replace_all(v, "_", "-")),
-              caption = glue("Mean factor position by level of {v}, three ways.")) |>
+              caption = glue("Mean factor position by level of {v}, 
+                             three ways.")) |>
     cat(sep = "\n")
   cat("\n\n")
 
@@ -776,7 +819,8 @@ domain_reads <- map(cfg$aux, function(v) {
   list_rbind()
 
 lca_table(domain_reads, widths = c("7em", "22em", "16em"),
-          caption = "Drafted reading of each demographic. Verify against the tables above.")
+          caption = "Drafted reading of each demographic. Verify against the 
+          tables above.")
 ```
 
 # The delivered product
@@ -796,7 +840,8 @@ saveRDS(list(fit = fit_w, param_tbl = param_tbl, eig_tbl = eig_tbl,
              factor_labels = factor_labels, anchors = anchors),
         file.path(cfg$cfa_dir, "cfa_fit.rds"))
 
-cat("Wrote survey_with_factor.sav, three CSVs, and cfa_fit.rds to", cfg$cfa_dir, "\n")
+cat("Wrote survey_with_factor.sav, three CSVs, and cfa_fit.rds to", 
+    cfg$cfa_dir, "\n")
 ```
 
 # Comparing the two arms {#sec-compare}
