@@ -1,0 +1,610 @@
+---
+# =============================================================================
+#  EDIT BLOCK 1 of 2: everything you change to swap the demonstration file for
+#  the work project lives here and in the LaTeX block below.
+# =============================================================================
+title: "Measuring What We Never Asked"
+subtitle: "Grouping survey items into population inferences, with the sample design carried through"
+author: "Kevin Linares"
+institute: "Public Opinion Research"
+date: today
+date-format: "D MMMM YYYY"
+
+params:
+  out_dir: "../output/lca"
+  study: "AmericasBarometer 2023, Ecuador"
+  concept: "economic vulnerability"
+  n_total: 1604
+  n_analysis: 1445
+  n_assigned: 1604
+  n_strata: 3
+  n_psu: 84
+  design_df: 81
+  mean_cluster: 19
+  focus_demo: "age_cat"
+  focus_demo_label: "Age group"
+  step1_median: 2.17
+  step1_max: 4.22
+
+format:
+  beamer:
+    aspectratio: 169
+    theme: default
+    slide-level: 2
+    keep-tex: true
+    pdf-engine: pdflatex
+    header-includes: |
+      \usepackage{tikz}
+      \usetikzlibrary{arrows.meta,positioning}
+      \usepackage{booktabs}
+
+      % ======================================================================
+      %  EDIT BLOCK 2 of 2: the classification banner.
+      % ======================================================================
+      \newcommand{\classification}{UNCLASSIFIED}
+      \definecolor{classbg}{HTML}{006400}
+      % ======================================================================
+
+      \definecolor{vpurple}{HTML}{440154}
+      \definecolor{vteal}{HTML}{21918C}
+      \definecolor{vgreen}{HTML}{5EC962}
+
+      \setbeamercolor{classbanner}{bg=classbg,fg=white}
+      \setbeamercolor{frametitle}{fg=vpurple,bg=white}
+      \setbeamercolor{title}{fg=vpurple}
+      \setbeamercolor{structure}{fg=vteal}
+      \setbeamertemplate{navigation symbols}{}
+
+      \setbeamertemplate{headline}{%
+        \begin{beamercolorbox}[wd=\paperwidth,ht=2.0ex,dp=0.7ex,center]{classbanner}%
+          \bfseries\small\classification%
+        \end{beamercolorbox}%
+      }
+      \setbeamertemplate{footline}{%
+        \begin{beamercolorbox}[wd=\paperwidth,ht=2.0ex,dp=0.7ex]{classbanner}%
+          \hspace*{2ex}\bfseries\small\insertframenumber\hfill\classification\hfill\hspace*{2ex}%
+        \end{beamercolorbox}%
+      }
+
+      % The bottom line for each slide. One sentence: what is happening, why.
+      \newcommand{\bottomline}[1]{\par\noindent{\small\color{vpurple}\textbf{#1}}\par\vspace{0.6em}}
+      \newcommand{\kicker}[1]{\par\noindent{\footnotesize\color{vteal}\textbf{\MakeUppercase{#1}}}\par\vspace{0.3em}}
+
+      % Uncomment to project speaker notes on a second screen:
+      % \setbeameroption{show notes on second screen=right}
+
+# =============================================================================
+#  CUT GUIDE. Slides tagged [CORE] or [OPTIONAL]; [BACKUP] live after the ask
+#  and are never shown unless asked. Fifteen minutes is CORE only.
+#  Cut order if running long: k-means, local independence, prompt detail.
+# =============================================================================
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(knitr)
+library(viridisLite)
+library(tidyverse)   # loaded last so dplyr verbs win
+
+out_dir <- params$out_dir
+
+# One artifact, so the deck cannot drift from the report that produced it.
+mf <- readRDS(file.path(out_dir, "model_fit.rds"))
+fit_w <- mf$fit_w
+enum <- mf$enum
+ci_tbl <- mf$ci_tbl
+item_discrim <- mf$item_discrim
+validation <- mf$validation
+
+segment_labels <- readr::read_csv(file.path(out_dir, "segment_labels.csv"),
+                                  show_col_types = FALSE)
+dom <- readr::read_csv(file.path(out_dir, "segment_demographics.csv"),
+                       show_col_types = FALSE)
+
+K_star <- length(fit_w$pi)
+n_items <- length(mf$items)
+
+lab_lev <- str_wrap(paste0("S", segment_labels$K, ": ", segment_labels$Label), 20)
+lab_of <- function(k) factor(lab_lev[k], levels = lab_lev)
+
+theme_slide <- function() {
+  theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          legend.text = element_text(size = 7),
+          legend.key.size = unit(0.4, "cm"),
+          plot.title = element_blank(),
+          strip.text = element_text(face = "bold"))
+}
+
+# Prevalences come from the pi rows of the parameter table, which already carry
+# the design-based intervals.
+prev <- ci_tbl |>
+  filter(kind == "pi") |>
+  transmute(segment, p = estimate, lo, hi, label = lab_of(segment))
+
+# Largest and smallest segment, for the prose on the shares slide.
+big <- slice_max(prev, p, n = 1)
+small <- slice_min(prev, p, n = 1)
+```
+
+## This project started with a battery and no principled way to summarize it {.shrink}
+
+<!-- [CORE] 1 -->
+\bottomline{We field `r n_items` items to measure something no respondent answers directly, and how we combine them has always been settled by convention rather than by evidence.}
+
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+\kicker{the two defaults}
+\small
+\begin{itemize}\itemsep4pt
+  \item \textbf{Average them into an index.} Readable, but it assumes every respondent differs from every other only in \emph{how much}.
+  \item \textbf{Report all `r n_items` separately.} Faithful, but no policymaker product can carry `r n_items` lines, so someone collapses them anyway, off the record.
+\end{itemize}
+\end{column}
+\begin{column}{0.44\textwidth}
+\kicker{the question nobody had tested}
+\small
+Is the index a summary of the battery, or an artifact of the decision to build one?
+
+\vspace{0.5em}
+
+That is an empirical question. This project answers it, and carries the sample design through the answer.
+\end{column}
+\end{columns}
+
+\note{Ninety seconds. Name the concrete request that started this: someone asked for one number off this battery for a country product. Both available answers were defaults nobody had ever checked. Do not defend the method yet.}
+
+## Nobody in our data was ever asked the question we report on {.shrink}
+
+<!-- [CORE] 2 -->
+\bottomline{Every statement we publish about `r params$concept` is an inference from proxies, and its quality depends entirely on how those proxies are combined.}
+
+\vspace{0.3em}
+
+\begin{center}
+\begin{tikzpicture}[font=\small]
+  \node[draw=vpurple,thick,rounded corners,fill=vpurple!8,minimum width=4.4cm,minimum height=1.1cm] (concept) at (0,0) {\textbf{What we report}};
+  \node[below=0.05cm of concept,text width=4.4cm,align=center,font=\scriptsize\itshape] {`r str_to_title(params$concept)`};
+  \node[draw=vteal,rounded corners,minimum width=2.6cm] (i1) at (-4.6,-2.6) {Owns a refrigerator};
+  \node[draw=vteal,rounded corners,minimum width=2.6cm] (i2) at (-1.5,-2.6) {Ran short of food};
+  \node[draw=vteal,rounded corners,minimum width=2.6cm] (i3) at (1.6,-2.6) {Feels unsafe};
+  \node[draw=vteal,rounded corners,minimum width=2.6cm] (i4) at (4.7,-2.6) {Receives aid};
+  \draw[-{Latex},vteal] (i1) -- (concept);
+  \draw[-{Latex},vteal] (i2) -- (concept);
+  \draw[-{Latex},vteal] (i3) -- (concept);
+  \draw[-{Latex},vteal] (i4) -- (concept);
+  \node[font=\scriptsize,text=vpurple] at (7.0,-1.3) {\ldots and `r n_items - 4` more};
+\end{tikzpicture}
+\end{center}
+
+\vspace{0.2em}
+
+\centering\small On what basis do we decide that these `r n_items` answers add up to that one thing?
+
+\note{This is the hook. Say the concept out loud, then say no one was asked it. Ask the question on the last line and pause. Do not answer it yet. Swap the four item labels for the ones on the country account.}
+
+## A battery can differ in degree or in kind, and only one summary is right {.shrink}
+
+<!-- [CORE] 3 -->
+\bottomline{If people differ in how much, one scale describes them; if they differ in which answers they favor, that scale averages opposite people into a middle where nobody actually sits.}
+
+```{r fork-figure}
+#| fig-width: 9
+#| fig-height: 3.1
+#| out-width: 100%
+tibble(kind = rep(c("Degree: one scale describes them",
+                    "Kind: no single scale holds both"), each = 12),
+       grp = rep(rep(c("Group A", "Group B"), each = 6), 2),
+       item = rep(1:6, 4),
+       y = c(0.75, 0.72, 0.78, 0.74, 0.71, 0.76,
+             0.28, 0.25, 0.31, 0.27, 0.24, 0.29,
+             0.82, 0.79, 0.24, 0.21, 0.77, 0.26,
+             0.22, 0.26, 0.81, 0.84, 0.23, 0.80)) |>
+  mutate(kind = factor(kind, levels = c("Degree: one scale describes them",
+                                        "Kind: no single scale holds both"))) |>
+  ggplot(aes(item, y, color = grp, group = grp)) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 2.2) +
+  facet_wrap(~ kind) +
+  scale_color_manual(values = c("Group A" = "#440154", "Group B" = "#21918C")) +
+  scale_x_continuous(breaks = 1:6, labels = paste0("Q", 1:6)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = NULL, y = "Tends to answer high", color = NULL) +
+  theme_slide()
+```
+
+\centering\small Which picture our battery matches is a question the data can answer. Until now we have answered it by assumption.
+
+\note{No real data on this slide on purpose. Left panel: an index is fine, the groups differ only in level. Right panel: the lines cross, an index puts both groups at the same middling number. Forty-five seconds.}
+
+## Roadmap {.shrink}
+
+<!-- [CORE] 4 -->
+\bottomline{You have the question; here is the order in which the rest of this answers it.}
+
+\vspace{0.5em}
+
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+\begin{enumerate}\itemsep5pt
+  \item \textbf{What we found} on `r params$study`
+  \item \textbf{How the method decides} degree versus kind
+  \item \textbf{Why the sample design} changes the answer
+  \item \textbf{Where AI fits}, and where it must not
+  \item \textbf{What I need from you}: how to capture this in production
+\end{enumerate}
+\end{column}
+\begin{column}{0.44\textwidth}
+\small
+\textbf{The claim in one line}
+
+\vspace{0.4em}
+
+Grouping survey items into a population inference is a measurement decision and a design decision at once. Doing either alone gives a number we cannot defend.
+\end{column}
+\end{columns}
+
+\note{Thirty seconds, no more. The roadmap is here rather than up front because slides 1 to 3 gave it something to organize.}
+
+## On `r params$study`, the answer is kind, not degree {.shrink}
+
+<!-- [CORE] 5 -->
+\bottomline{The battery does not line respondents up on one scale; it separates them into `r K_star` recognizable groups, which means an index built from it has been averaging distinct publics together.}
+
+```{r profiles}
+#| fig-width: 9
+#| fig-height: 3.3
+#| out-width: 100%
+map(seq_along(fit_w$rho), function(j) {
+  r = fit_w$rho[[j]]
+  tibble(item = mf$items[j], segment = rep(seq_len(K_star), each = nrow(r)),
+         cat = rep(seq_len(nrow(r)), times = K_star),
+         p = as.vector(r)) |>
+    group_by(segment) |>
+    summarise(m = (sum(cat * p) - 1) / (max(cat) - 1), .groups = "drop") |>
+    mutate(item = mf$items[j])
+}) |>
+  list_rbind() |>
+  mutate(label = lab_of(segment), item = factor(item, levels = mf$items)) |>
+  ggplot(aes(item, m, color = label, group = label)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.8) +
+  scale_color_viridis_d(end = 0.9) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = NULL, y = "Expected answer, scaled", color = NULL) +
+  theme_slide() +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1, size = 7))
+```
+
+\centering\small Lines that cross are the evidence: these groups reorder the items rather than sitting above and below each other.
+
+\note{The payoff. Walk two segments only, by name, and point at one crossing. Resist naming all of them. Sixty seconds.}
+
+## These are population shares, not clusters that exist only in this file {.shrink}
+
+<!-- [CORE] 6 -->
+\bottomline{Each segment is estimated as a share of the adult population with its own margin of error, so these are numbers a product can carry.}
+
+```{r prevalences}
+#| fig-width: 8.5
+#| fig-height: 2.9
+#| out-width: 95%
+prev |>
+  ggplot(aes(p, fct_rev(label))) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.18, color = "#21918C") +
+  geom_point(size = 3, color = "#440154") +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, max(prev$hi) * 1.12)) +
+  labs(x = "Share of the population, with 95% interval", y = NULL) +
+  theme_slide()
+```
+
+\small The largest segment is `r sprintf("%.0f%%", 100 * big$p)` of adults (`r sprintf("%.0f to %.0f%%", 100 * big$lo, 100 * big$hi)`); the smallest is `r sprintf("%.0f%%", 100 * small$p)`. Intervals come from the sample design, not from a formula that assumes independent respondents.
+
+\note{The word to land is population. A cluster analysis gives you groups in this file; this gives you shares of the country with uncertainty attached. Forty-five seconds.}
+
+## The segments cut across `r str_to_lower(params$focus_demo_label)` in ways the toplines hide {.shrink}
+
+<!-- [CORE] 7 -->
+\bottomline{Groups that look similar on a topline concentrate in different segments, which is why subgroup trends built on an index have looked flat.}
+
+```{r demo-composition}
+#| fig-width: 9
+#| fig-height: 3.2
+#| out-width: 100%
+dom |>
+  filter(demographic == params$focus_demo, estimator == "BCH") |>
+  mutate(label = lab_of(segment)) |>
+  ggplot(aes(prevalence, fct_rev(level), color = label)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.16,
+                 position = position_dodge(width = 0.6)) +
+  geom_point(size = 2, position = position_dodge(width = 0.6)) +
+  scale_color_viridis_d(end = 0.9) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(x = paste("Share of each", str_to_lower(params$focus_demo_label),
+                 "in each segment"),
+       y = NULL, color = NULL) +
+  theme_slide()
+```
+
+\note{Their standard cross-tab, showing something their standard cross-tab cannot. Name one contrast that would change a country product. Sixty seconds.}
+
+## What we would have reported, and what the data support {.shrink}
+
+<!-- [CORE] 8 -->
+\bottomline{Reading across the three versions shows first what ignoring the sample design costs, then what forcing each respondent into one box costs, and the second gap is the larger one.}
+
+```{r three-estimators}
+#| fig-width: 9
+#| fig-height: 3.0
+#| out-width: 100%
+dom |>
+  filter(demographic == params$focus_demo) |>
+  mutate(label = lab_of(segment),
+         estimator = factor(estimator,
+                            levels = c("Unweighted", "Design-based", "BCH"))) |>
+  ggplot(aes(prevalence, fct_rev(level), color = estimator, shape = estimator)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.15,
+                 position = position_dodge(width = 0.7)) +
+  geom_point(size = 2, position = position_dodge(width = 0.7)) +
+  facet_wrap(~ label, nrow = 1) +
+  scale_color_viridis_d(end = 0.85) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(x = NULL, y = NULL, color = NULL, shape = NULL) +
+  theme_slide() +
+  theme(strip.text = element_text(size = 6.5, face = "bold"),
+        axis.text.x = element_text(size = 6.5))
+```
+
+\small\textbf{Unweighted} is the plain cross-tab. \textbf{Design-based} adds the weights and the clustering. \textbf{Corrected} additionally undoes the shrinkage that assigning each respondent to one segment introduces.
+
+\note{Do not explain BCH here. The point is that the three rows are different and only the third is defensible. If asked how the correction works, go to backup. Sixty seconds.}
+
+## The method groups respondents by pattern, not by score {.shrink}
+
+<!-- [CORE] 9 -->
+\bottomline{A latent class model asks which answers travel together, so it can find people who are secure on some items and exposed on others, which a scale cannot represent.}
+
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\kicker{what the model estimates}
+\small
+\begin{itemize}\itemsep3pt
+  \item How many kinds of respondent there are
+  \item For each kind, the probability of every answer to every item
+  \item For each respondent, which kind they most resemble, and how sure we are
+\end{itemize}
+\end{column}
+\begin{column}{0.46\textwidth}
+\kicker{why it suits us}
+\small
+Measurement error becomes a parameter we estimate rather than noise we hope cancels. Each item is treated as a fallible reading of something we cannot observe.
+
+\vspace{0.4em}
+
+The number of groups is never chosen by the software. The analyst reads the evidence and records the decision.
+\end{column}
+\end{columns}
+
+\note{The only conceptual slide. No equations for this room. Sixty seconds.}
+
+## k-means would have returned groups whether or not any existed {.shrink}
+
+<!-- [OPTIONAL] 10 -->
+\bottomline{Clustering gives whatever number of groups we ask for, cannot use the survey weights, and reports no uncertainty, so it cannot tell us a segment is real or how large it is in the country.}
+
+\vspace{0.4em}
+
+\small
+\begin{tabular}{p{4.8cm} p{4.6cm} p{4.6cm}}
+\toprule
+ & \textbf{k-means} & \textbf{This method} \\
+\midrule
+How many groups & Whatever $k$ you pass & Evidence plus a recorded analyst decision \\
+Survey weights & Not used & Enter every estimate \\
+Clustered sample & Ignored & Carried through every margin of error \\
+Uncertainty & None reported & Interval on every quantity \\
+Mixed item formats & Distance is arbitrary & Handled natively \\
+\bottomrule
+\end{tabular}
+
+\note{This answers the question already in the room. If time is short this is the first cut, but only if nobody in the audience does cluster analysis.}
+
+## Our samples are clustered and weighted, so default software understates uncertainty {.shrink}
+
+<!-- [CORE] 11 -->
+\bottomline{Respondents arrive in neighborhood clusters of about `r params$mean_cluster` under a stratified design, and standard packages compute margins of error as though each had been drawn independently.}
+
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\kicker{this design}
+\small
+`r format(params$n_total, big.mark = ",")` respondents \textbullet{} `r params$n_strata` strata \textbullet{} `r params$n_psu` sampling points \textbullet{} `r params$design_df` degrees of freedom
+
+\vspace{0.5em}
+
+People in the same neighborhood answer alike, so `r format(params$n_total, big.mark = ",")` interviews carry less information than `r format(params$n_total, big.mark = ",")` independent ones. Every interval here is rebuilt `r params$n_psu` times, leaving out one sampling point each time.
+\end{column}
+\begin{column}{0.48\textwidth}
+\kicker{errors this addresses}
+\small
+\begin{itemize}\itemsep2pt
+  \item \textbf{Sampling error} estimated from the design we actually used
+  \item \textbf{Measurement error} estimated as a parameter, not assumed away
+  \item \textbf{Item nonresponse}: partial responders scored, not discarded
+  \item \textbf{Classification error} introduced by the method, then corrected
+\end{itemize}
+\end{column}
+\end{columns}
+
+\note{Weighting they know. Clustering they mostly do not. Spend the extra beat on the left column. The right column is the total survey error content without the framework diagram. Seventy seconds.}
+
+## Treating the measurement model as known understates our uncertainty {.shrink}
+
+<!-- [CORE] 12 -->
+\bottomline{When we also rebuild the model itself inside every replicate, the margins of error roughly double, so intervals computed the standard way are optimistic and some differences do not survive.}
+
+\vspace{0.5em}
+
+\begin{columns}[T]
+\begin{column}{0.52\textwidth}
+\small
+Standard practice fits the measurement model once and treats it as fixed when estimating subgroup shares. Refitting it inside every replicate multiplies the margins of error by a median of \textbf{`r params$step1_median`} and by as much as \textbf{`r params$step1_max`}.
+\end{column}
+\begin{column}{0.44\textwidth}
+\small
+\textbf{What this means for a product}
+
+\vspace{0.4em}
+
+Report the segment shares. Be slower to report that two subgroups differ, and check that the difference survives the wider interval before it reaches a briefing.
+\end{column}
+\end{columns}
+
+\note{This is the credibility slide. Volunteering it buys trust in everything else. Say plainly that we found this because we checked, and that the check is not standard practice. Fifty seconds.}
+
+## The language model names segments and never touches a number {.shrink}
+
+<!-- [CORE] 13 -->
+\bottomline{An LLM drafts segment names and reads the subgroup tables under a fixed instrument, after every estimate is final, so a wrong name is a wording problem and never a statistical one.}
+
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\kicker{what it sees}
+\small
+\begin{itemize}\itemsep2pt
+  \item Response probabilities, one segment at a time
+  \item The question wording
+  \item Which subgroups the analysis resolved
+\end{itemize}
+\end{column}
+\begin{column}{0.48\textwidth}
+\kicker{what it never sees or does}
+\small
+\begin{itemize}\itemsep2pt
+  \item No margins of error, no test statistics
+  \item Never decides whether a difference is real
+  \item Never combines probabilities
+  \item Names freeze to a file the analyst edits
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vspace{0.4em}
+
+\centering\small Names vary between runs, which is exactly why they are drafts and never enter a calculation.
+
+\note{Say the guardrails as constraints we imposed, not as limitations we discovered. This is the slide that makes the AI use defensible rather than fashionable. Fifty seconds.}
+
+## The same pipeline runs on any country and any battery {.shrink}
+
+<!-- [CORE] 14 -->
+\bottomline{Porting to a new account changes six things, all in one configuration file, and the method applies wherever respondents differ in which answers they favor rather than how much.}
+
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\kicker{what changes in a port}
+\small
+The file path, the item list, the nonresponse codes, the design variables, the demographic recodes, the number of groups.
+
+\vspace{0.4em}
+
+Everything else, including every margin of error, is unchanged.
+\end{column}
+\begin{column}{0.48\textwidth}
+\kicker{where it could go next}
+\small
+\begin{itemize}\itemsep2pt
+  \item A second country on the same battery
+  \item A different topic domain
+  \item The same country across rounds, to see whether a segment is growing
+\end{itemize}
+
+\vspace{0.3em}
+
+Which account wants to go first?
+\end{column}
+\end{columns}
+
+\note{The collaboration ask. Name two accounts you have in mind and stop talking. Forty seconds.}
+
+## The details cannot go in a policymaker product, so where do they live? {.shrink}
+
+<!-- [CORE] 15 -->
+\bottomline{A two-page product can carry a segment name and a share, but not the design, the corrections, or the caveats, and I want your read on how we capture that so it survives past any one analyst.}
+
+\vspace{0.4em}
+
+\begin{columns}[T]
+\begin{column}{0.50\textwidth}
+\kicker{three options}
+\small
+\begin{enumerate}\itemsep3pt
+  \item A standing \textbf{methods annex} per account that each product links to
+  \item A shared \textbf{archive}: configuration, diagnostics, and frozen segment names, citable per run
+  \item A \textbf{one-pager} that travels with each product: what the segments are, what the intervals mean, what the method cannot support
+\end{enumerate}
+\end{column}
+\begin{column}{0.46\textwidth}
+\kicker{what i need answered}
+\small
+\begin{itemize}\itemsep3pt
+  \item What must be preserved for someone to reproduce a published number in two years?
+  \item Who reviews a segment name before it reaches a briefing?
+  \item What is the minimum caveat that must appear in the product itself?
+\end{itemize}
+\end{column}
+\end{columns}
+
+\note{Three minutes of discussion live here. Ask the three questions and let the room talk. Write down what they say; this is the reason for the briefing.}
+
+# Backup
+
+## How the correction works {.shrink}
+
+<!-- [BACKUP] -->
+\bottomline{Assigning each respondent to their most likely segment misclassifies some of them, which pulls subgroup differences toward each other; the correction estimates that misclassification and undoes it.}
+
+\small
+The model tells us, for every respondent, the probability of belonging to each segment. Those probabilities imply a table: of everyone truly in segment A, what share gets assigned to A, to B, and so on. Inverting that table reweights the cross-tab so the differences come back to their unattenuated size. The reweighting can push a cell slightly outside 0 to 100 percent, which is a property of the correction rather than an error.
+
+\note{Only if asked. Do not volunteer.}
+
+## How many segments, and how we decided {.shrink}
+
+<!-- [BACKUP] -->
+
+```{r enum-table}
+enum |>
+  transmute(K, `Log-likelihood` = round(logLik, 1), Parameters = df,
+            BIC = round(BIC, 1), Entropy = round(entropy, 3)) |>
+  kable(booktabs = TRUE, align = "r")
+```
+
+\small Lower BIC is better fit for the parameters spent; entropy near 1 means respondents are cleanly separated. Neither decides alone, and the software never picks. The analyst reads these with the profiles and records the choice.
+
+## Which items are doing the work {.shrink}
+
+<!-- [BACKUP] -->
+
+```{r discrim-table}
+item_discrim |>
+  transmute(Item = item, Separation = sprintf("%.3f", discrimination)) |>
+  head(8) |>
+  kable(booktabs = TRUE, align = "lr")
+```
+
+\small Separation is the average probability gap between two segments on that item, from 0 to 1. An item near 0 is carrying nothing and is a candidate for removal.
+
+## Validated against an independent implementation {.shrink}
+
+<!-- [BACKUP] -->
+\bottomline{At equal weights our estimator and a published package must agree, and the pipeline checks this on every run rather than asserting it.}
+
+\small
+Largest gap in segment sizes: `r sprintf("%.5f", validation$max_pi_gap)`. Largest gap in response probabilities: `r sprintf("%.5f", validation$max_rho_gap)`. The run halts if these exceed a tolerance.

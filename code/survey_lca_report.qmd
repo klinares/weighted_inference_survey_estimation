@@ -1,0 +1,1063 @@
+---
+title: "Segmenting a Survey Population Without Overstating What the Design Supports"
+subtitle: "A latent class workflow with replicate variance throughout, applied to economic vulnerability in Ecuador"
+author: "Kevin Linares"
+date: today
+format:
+  pdf:
+    toc: false
+    toc-depth: 2
+    number-sections: true
+    fig-width: 7
+    fig-height: 4.5
+    fig-align: center
+    df-print: kable
+    geometry: margin=1in
+    fig-crop: false
+bibliography: bibliography.bib
+execute:
+  warning: false
+  message: false
+  cache: true
+---
+
+```{r setup}
+#| include: false
+pacman::p_load(matrixStats, clue, survey, furrr, kableExtra, poLCA, here,
+               viridis, glue, sjlabelled, haven, knitr, tidyverse)
+source("source_code.R")
+source("survey_lca_config.R")
+init_parallel(cfg)
+# The enumeration below runs either way; everything from the chosen model on
+# waits until cfg$K_force is set.
+K_ready <- !is.null(cfg$K_force)
+K_star <- if (K_ready) as.integer(cfg$K_force) else NA_integer_
+```
+
+# Purpose and scope
+
+This document is both the methodology of a design-based latent class analysis (LCA) workflow and a worked application of it. Every estimator is stated where it is first used and immediately applied, so a reader can follow the reasoning and the results together. The application is the institutional trust battery from the 2023 LAPOP AmericasBarometer survey of Ecuado; the survey is an example, and the methods are the subject.
+
+Throughout, a latent class is called a **segment**. This is a word-choice preference for applied audiences; the statistical object is unchanged.
+
+The workflow's organizing commitment is that **one replicate design generates every standard error in the analysis**. The same stratified jackknife replicate weights that produce the interval on a conditional response probability produce the interval on a segment prevalence within a demographic group. Nothing is computed under an independence assumption at any stage.
+
+The closest existing software is the `baysc` package [@wu2024; @wu2026joss], which fits a weighted objective within a Bayesian pseudo-posterior with a post-hoc variance adjustment. It differs in three respects: it selects the number of segments automatically through an overfitted mixture, it obtains uncertainty from an adjusted posterior rather than replicate weights, and being Bayesian it propagates classification uncertainty through the posterior draws, which makes the attenuation discussed in @sec-domains a non-issue in that framework. The two are complements. This workflow is the frequentist, replicate-variance counterpart, and it has base survey dependencies only, which matters in analytic environments restricted to CRAN.
+
+Three files feed this report. `survey_data_read.R` reads the file and cleans the design columns and demographics, which both arms share, so the recode block exists in exactly one place. `survey_lca_config.R` names the items and the settings for this arm. `source_code.R` is the estimation engine and is never edited per dataset. @sec-replication documents what a port requires.
+
+# Where this sits in the Total Survey Error framework {#sec-tse}
+
+The Total Survey Error (TSE) framework enumerates the distinct sources of error that arise as a survey is conducted, organized around the survey life cycle and split into two arms [@groves2009; @groves2010]. The **representation** arm runs from the target population through coverage error to the sampling frame, sampling error to the sample, nonresponse error to the respondents, and adjustment error to the survey statistic. The **measurement** arm runs from the construct through validity error to the measurement, measurement error to the response, and processing error to the edited data. Errors attach to *transitions*, not to the survey as a whole, which is why several are properties of an estimate rather than of the survey.
+
+Locating this workflow in that framework clarifies what it does and does not accomplish.
+
+**Sampling error is what this workflow is chiefly about.** Sampling error is the one representation error that is intended and controllable by design, and under a sound design it is variance rather than bias. The difficulty is that estimating it correctly requires using the realized design, and a recognized weakness of practice is that many organizations report only sampling error while computing it as though the sample were simple and random. A latent class model fit to a stratified, clustered sample and analyzed with default software produces margins of error that are too narrow, and the understatement can be large. @sec-variance addresses this directly.
+
+**Adjustment error is engaged but not removed.** Post-survey weighting reduces nonresponse and noncoverage bias at the cost of increased sampling variance, and that increase is itself a source of error. This workflow carries the released weights into every step of estimation so that segments describe the population, and reports the unequal weighting effect so the variance cost is visible rather than implicit.
+
+**Nonresponse error is addressed at the item level only.** Respondents who skipped some items are scored from the items they answered rather than discarded, and all domain estimation runs on that larger frame, because item nonresponse on attitude batteries is not random (@sec-scoring). Unit nonresponse is handled by the data provider's weights and is not modeled here.
+
+**Measurement error is the reason to use a latent class model at all.** LCA is used in survey research precisely because it accommodates error-prone categorical indicators: the latent segment is the construct, the items are its fallible measurements, and the conditional response probabilities are estimates of how the measurement behaves within each segment. The model does not remove measurement error; it makes it a parameter.
+
+**Processing error is introduced by this workflow and must be acknowledged.** Two steps add error after the response is recorded. Assigning each respondent to a single most likely segment introduces classification error, which attenuates associations between segments and covariates (@sec-domains). Drafting segment names with a language model is a processing step whose output is a label, reviewed and owned by the analyst, that never enters a computation (@sec-labeling).
+
+**Coverage error and validity are out of scope.** They are properties of the frame and the questionnaire, fixed before any analysis begins.
+
+Two caveats about the framework itself are worth carrying forward. TSE centers on accuracy and is largely silent on the other dimensions of data quality: relevance, timeliness, accessibility, interpretability, and coherence [@brackstone1999]. And its tree structure can imply that error sources are independent when they are frequently correlated; the classification error introduced in @sec-domains, for example, is larger for respondents who answered fewer items, which links a processing error to an item nonresponse error.
+
+# Choosing between a latent class model and a factor model {#sec-choosing}
+
+Both models take the same battery of answers and look for something underneath that the individual questions only measure imperfectly. They differ in what they assume that something is. A latent class model assumes it is a small number of distinct kinds of respondent, and asks which kind each person most resembles. A factor model assumes it is a single continuum running from low to high, and asks where on it each person sits. Neither assumption is more correct in general; the battery decides.
+
+The practical question is whether people differ in *how much* or in *which*. If respondents mostly line up from those who answer low on everything to those who answer high on everything, a continuum describes them and the classes are just cut points on it. If instead a substantial group trusts some institutions while distrusting others, and a different group reverses that pattern, then no single number can represent both and the class model is recovering something real. This report includes a diagnostic that measures the balance between the two: how much segments differ in overall level, against how much they differ in which items they favour.
+
+The class model has a communication advantage that is worth weighing. Its output is a share of a group, and shares are what most readers already know how to interpret: saying that thirty-one per cent of rural respondents fall in the distrustful segment needs no explanation. A factor model produces a position on a scale with no natural units, which has to be translated before anyone outside the analysis can use it. That is a reason to prefer classes when the substantive difference between the two models is small, and it is not a reason to prefer them when it is large.
+
+Both models rest on the same central assumption, called local independence: that once you know a person's class, or their position on the factor, their answers to the individual questions carry no further relationship to each other. This is what allows either model to be summarised so compactly, and it is the first thing to fail when the battery contains two questions that are really asking the same thing. The report checks it directly and reports where it strains.
+
+The assumptions that differ are these. The class model assumes classes are genuinely discrete rather than convenient cut points on a continuum, and it does not assume the response categories are ordered, which is why it can pick up a group that avoids the middle of a scale or clusters on one particular answer. The factor model assumes the relationship between each question and the underlying continuum is monotonic, so that more of the trait always means a higher answer, and in exchange it estimates far fewer quantities and is much more stable at small sample sizes. An item that violates monotonicity can separate classes strongly while contributing almost nothing to a factor, and the reverse also happens. Where the two disagree about an item, that disagreement is information about the battery rather than a problem to be resolved by picking one model.
+
+# Data and preparation
+
+The 2023 AmericasBarometer round in Ecuador interviewed voting-age adults under a stratified, clustered design with released base weights [@lapop2023]. We analyze an eleven-item battery on the material circumstances of the household and the respondent's own situation: durable goods, running short of food or water, perceived change in personal finances, neighbourhood safety and crime victimisation, receipt of government assistance and of a conditional cash transfer, and intention to emigrate. The items carry two, three and four response categories and span unrelated domains, which is the case a class model handles natively and a factor model cannot.
+
+Preparation happens in `survey_data_read.R` and `survey_lca_config.R`, and follows three rules. Nonresponse codes are recoded to missing, with the source file read so those codes are visible rather than silently converted on import. Items are recoded to consecutive integers over their observed categories on *every* row of the file, so the estimation frame and the prediction frame of @sec-scoring share one coding by construction. Demographic recodes are written as one exhaustive `recode_values` per variable with `unmatched = "error"`, so the render halts if any source label falls through, since a pattern-matching scheme can silently misclassify or delete respondents.
+
+```{r data-missingness}
+#| echo: false
+#| fig-height: 5
+#| fig-cap: "All respondents, all items, with missingness shown explicitly in grey. The analysis rule removes the grey."
+plot_item_stack(survey_dat_full, items, "Items as read, with missingness")
+
+glue("{nrow(cfg$data)} of {nrow(survey_dat_full)} respondents enter estimation.")
+```
+
+```{r recode-audit}
+#| echo: false
+lca_table(recode_audit,
+          col.names = c("Variable", "Source label", "Recoded to", "n"),
+          widths = c("6em", "21em", "9em", "3em"),
+          caption = "Recode audit: what every source label became.")
+```
+
+```{r dictionary}
+#| echo: false
+dictionary |>
+  mutate(responses = map_chr(responses, \(x) paste(x, collapse = " | "))) |>
+  lca_table(col.names = c("Analysis name", "Source variable",
+                          "Survey question", "Response labels"),
+            widths = c("8em", "5em", "16em", "14em"),
+            caption = "Item dictionary, with response labels in fitted-category order.")
+```
+
+```{r prepare}
+dat <- cfg$data
+w_vec <- dat[[cfg$weight]]
+n_obs <- nrow(dat)
+scale_ic <- n_obs / sum(w_vec)
+cv_w <- sd(w_vec) / mean(w_vec)
+
+glue("Weights: CV = {round(cv_w, 3)}, ",
+     "unequal weighting effect = {round(1 + cv_w^2, 2)}.")
+```
+
+The unequal weighting effect $1 + \mathrm{CV}^2(w)$ is the multiplicative variance penalty that weight variation imposes even when the weights are unrelated to the survey variable [@kish1965]. It is the adjustment-error cost referred to in @sec-tse. When it is close to 1 the weighted and unweighted fits will differ little, and the comparison in @sec-validation should be read accordingly.
+
+# The latent class model
+
+Let $\mathbf{y}_i = (y_{i1},\dots,y_{iJ})$ be respondent $i$'s answers to $J$ categorical items, item $j$ having $C_j$ categories. With $K$ segments, prevalences $\pi_k$, and conditional response probabilities $\rho_{jck} = P(y_{ij}=c \mid X_i = k)$ where $X_i$ denotes latent membership,
+
+$$P(\mathbf{y}_i) = \sum_{k=1}^{K} \pi_k \prod_{j=1}^{J} \rho_{j\,y_{ij}\,k},
+\qquad \sum_{k=1}^{K}\pi_k = 1, \qquad \sum_{c=1}^{C_j}\rho_{jck} = 1 .$$
+
+The product over items is **local independence**: conditional on segment, items are independent [@lazarsfeld1968; @goodman1974]. It is the assumption that makes the model parsimonious, that licenses scoring partially observed respondents in @sec-scoring, and that fails first under misspecification, which is why @sec-diagnostics probes it. Model dimension is
+
+$$d_K = (K-1) + K\sum_{j=1}^{J}(C_j - 1),$$
+
+one free parameter per prevalence beyond the last and $C_j-1$ free conditional probabilities per item per segment. the model dimension above is what the information criteria in @sec-selection penalise. This grows linearly in $K$ with slope $\sum_j(C_j-1)$, so batteries with many response categories become expensive quickly. The eleven items analysed here carry $\sum_j(C_j-1) = 15$, giving $d_K = 15K - 1$ and 59 free parameters at $K=4$. A thirteen-item seven-category battery, the one the factor arm analyses, would carry $\sum_j(C_j-1) = 78$ and 394 free parameters at $K=5$, which is why the choice of battery and the choice of model are not separable questions.
+
+# Design-weighted estimation
+
+Under a complex design with base weights $w_i$, estimation maximizes the pseudo-log-likelihood
+
+$$\ell_w(\boldsymbol\theta) = \sum_{i=1}^{n} w_i
+\log\!\Big(\sum_{k=1}^{K}\pi_k \prod_{j=1}^{J}\rho_{j\,y_{ij}\,k}\Big),$$
+
+the standard device for latent class analysis under complex sampling [@patterson2002; @vermunt2007; @asparouhov2005; @skinner1989]. This is a pseudo-likelihood, not a likelihood: it is the sample-based estimate of the census log-likelihood that would be computed if the whole population were observed. Its maximizer is consistent for the census parameter under standard conditions, but it is not the maximizer of a probability model for the observed data, which is why the design must supply the variance rather than the curvature of $\ell_w$.
+
+The EM algorithm [@dempster1977] alternates an expectation step computing posterior membership,
+
+$$p_{ik} = \frac{\pi_k \prod_j \rho_{j\,y_{ij}\,k}}
+{\sum_{l=1}^{K}\pi_l \prod_j \rho_{j\,y_{ij}\,l}},$$
+
+and a maximization step in which weights enter every sufficient statistic,
+
+$$\hat\pi_k = \frac{\sum_i w_i p_{ik}}{\sum_i w_i},
+\qquad
+\hat\rho_{jck} = \frac{\sum_i w_i\, p_{ik}\, \mathbf 1(y_{ij}=c)}
+{\sum_i w_i\, p_{ik}\, \mathbf 1(y_{ij}\ \text{observed})} .$$
+
+Three implementation points in the E-step above and the M-step above are load-bearing rather than incidental. Restricting the $\hat\rho$ denominator to respondents who answered item $j$ is what keeps $\sum_c\hat\rho_{jck}=1$ under item nonresponse; with complete cases the restriction is vacuous. The expectation step accumulates $\log\rho$ across items and applies the log-sum-exp identity $\log\sum_k e^{z_k} = z_{\max} + \log\sum_k e^{z_k - z_{\max}}$ before exponentiating, because with many items the raw product underflows to zero and the E-step above becomes $0/0$. And a missing item contributes zero on the log scale, which is exactly equivalent to dropping it from the product in the mixture above; this equivalence, not an approximation, is what @sec-scoring relies on.
+
+Iteration stops when $|\Delta\ell_w| < \varepsilon(|\ell_w|+1)$, with $\varepsilon = 10^{-8}$ during enumeration and $10^{-10}$ for the chosen model and every replicate refit. Matching the replicate tolerance to the point-estimate tolerance matters because the jackknife variance is a sum of squared deviations from the full-sample estimate, so systematically under-converged replicates would enter as a bias in every one of those deviations.
+
+Because the pseudo-likelihood of a finite mixture can be multimodal with near-tied optima, each candidate model is fit from `cfg$n_starts` random starts and the reported solution is the best mode found; the claim is stated rather than hidden. Starting values are generated in the main session from a deterministic seed sequence and passed to parallel workers as data, so no worker touches the random number generator and results are identical under sequential and parallel execution. Point estimates are invariant to the scale of the weights.
+
+The likelihood is invariant to permutation of segment labels, so any two fits may agree completely and still not be comparable coordinate by coordinate. We align a fit to a reference by minimizing total squared distance between their response profiles over permutations,
+
+$$\hat\sigma = \arg\min_{\sigma\in\mathfrak S_K}\sum_{k=1}^{K}
+\big\lVert \boldsymbol\rho^{\text{fit}}_{\cdot\cdot\sigma(k)}
+- \boldsymbol\rho^{\text{ref}}_{\cdot\cdot k}\big\rVert^2 ,$$
+
+solved exactly by the Hungarian algorithm [@kuhn1955; @hornik2005] rather than by heuristic matching. Alignment is applied to replicate refits before they enter the variance, to the unweighted benchmark before comparison, and to any comparison across $K$.
+
+# Model selection {#sec-selection}
+
+An information criterion compares a maximized log-likelihood against a penalty in units of $\log(\text{sample size})$, and the two must sit on the same scale. Base weights rarely sum to $n$. Because $\ell_w$ is linear in the weights, multiplying it by $n/\sum_i w_i$ is exactly equivalent to refitting with weights rescaled to sum to $n$: point estimates are untouched and only the criteria change. With $\ell^*_w = \ell_w \cdot n/\sum_i w_i$,
+
+$$\mathrm{AIC} = -2\ell^*_w + 2 d_K,
+\qquad
+\mathrm{BIC} = -2\ell^*_w + d_K \log n .$$
+
+Without the rescaling in the rescaling above, weights summing to substantially more than $n$ inflate the log-likelihood relative to a fixed penalty and BIC leans toward too many segments [@lumley2015].
+
+We report alongside these the relative entropy of the posterior classification, on the weighted scale,
+
+$$R^2_E = 1 - \frac{-\sum_i w_i \sum_k p_{ik}\log p_{ik}}
+{\big(\sum_i w_i\big)\log K},$$
+
+which indexes classification sharpness [@ramaswamy1993]. The numerator of the entropy above is the weighted average posterior uncertainty. The numerator is the weighted average posterior uncertainty and the denominator its maximum, attained when every respondent's posterior is uniform over the $K$ segments, so $R^2_E$ runs from 0 at no classification information to 1 at perfect separation; values near 0.8 and above are conventionally read as good classification. Weighting is not cosmetic here: an unweighted entropy would describe the achieved sample's classification sharpness while every other quantity in the analysis describes the population.
+
+The bootstrap likelihood ratio test, often preferred for class enumeration under simple random sampling [@nylund2007], is omitted by design. Its parametric bootstrap draws new samples of independent observations from the fitted model, which is not the process that generated a stratified clustered sample. Mplus disables the test under complex-design analysis for the same reason, and nothing is gained by reporting a p-value whose null distribution is known to be wrong.
+
+The number of segments is never selected automatically. The analyst reviews the criteria, the entropy, the profiles, and the diagnostics of @sec-diagnostics, then fixes $K$ in configuration, where the decision is recorded and auditable.
+
+```{r enumerate}
+enum <- future_map(cfg$K_range, function(K) {
+  fit <- fit_lca(dat, w_vec, cats, cfg$items, K, start_seeds(cfg, K))
+  ll_n <- fit$ll * scale_ic
+  d <- df_k(K, cats)
+  tibble(K = K, logLik = ll_n, df = d,
+         AIC = -2 * ll_n + 2 * d,
+         BIC = -2 * ll_n + d * log(n_obs),
+         entropy = entropy_R2(fit$post, w_vec, K),
+         converged = fit$converged)
+}, .options = furrr_options(seed = NULL,
+     packages = c("matrixStats", "clue", "purrr", "dplyr", "tidyr"))) |>
+  list_rbind()
+
+enum |>
+  mutate(across(c(logLik, AIC, BIC), \(x) round(x, 1)),
+         entropy = round(entropy, 3)) |>
+  lca_table(align = "r",
+            caption = "Weighted fit statistics by number of segments. Nothing is selected here.")
+```
+
+```{r fig-enum}
+#| echo: false
+#| fig-height: 2.8
+#| fig-cap: "Enumeration diagnostics across K. BIC penalizes model dimension; relative entropy indexes classification sharpness. Neither decides alone."
+enum |>
+  select(K, BIC, entropy) |>
+  pivot_longer(-K, names_to = "criterion", values_to = "value") |>
+  mutate(criterion = recode(criterion, BIC = "Weighted BIC",
+                            entropy = "Relative entropy")) |>
+  ggplot(aes(K, value)) +
+  geom_line(linewidth = 0.6, color = viridisLite::viridis(1, begin = 0.4)) +
+  geom_point(size = 2.2, color = viridisLite::viridis(1, begin = 0.4)) +
+  facet_wrap(~ criterion, scales = "free_y") +
+  scale_x_continuous(breaks = cfg$K_range) +
+  labs(x = "Number of segments (K)", y = NULL) +
+  theme_lca()
+```
+
+# The chosen model
+
+```{r k-gate}
+#| results: asis
+if (!K_ready)
+  cat("**`cfg$K_force` is `NULL`.** Read the evidence above, set the number of",
+      "segments in `survey_lca_config.R`, then re-render. Everything below",
+      "waits on that.\n")
+```
+
+```{r fit-final}
+#| eval: !expr K_ready
+fit_w <- fit_lca(dat, w_vec, cats, cfg$items, K_star,
+                 start_seeds(cfg, K_star), maxit = 5000L, tol = 1e-10)
+fit_u <- align_to(fit_lca(dat, rep(1, n_obs), cats, cfg$items, K_star,
+                          start_seeds(cfg, K_star), maxit = 5000L, tol = 1e-10),
+                  fit_w)
+
+inp <- make_inputs(dat, cfg$items, cats)
+post_w <- posterior_of(fit_w$pi, fit_w$rho, inp$Y)
+colnames(post_w) <- paste0("post_segment", seq_len(K_star))
+modal_int <- max.col(post_w, ties.method = "first")
+
+glue(
+  "K = {K_star} on {n_obs} cases from {cfg$n_starts} starts. ",
+  "Converged: {if (isTRUE(fit_w$converged)) 'yes' else 'NO, inspect before trusting'}.\n",
+  "Weighted log-likelihood (sum-to-n scale): {round(fit_w$ll * scale_ic, 1)}\n",
+  "Weighted relative entropy: {round(entropy_R2(post_w, w_vec, K_star), 3)} | ",
+  "mean maximum posterior: {round(mean(post_w[cbind(seq_len(n_obs), modal_int)]), 3)}")
+```
+
+# Design-based variance estimation {#sec-variance}
+
+All uncertainty in this document comes from stratified delete-one-PSU jackknife replication [@wolter2007; @rust1996; @lumley2004]. With $a_h$ primary sampling units (PSUs, or clusters) in stratum $h$, the replicate that deletes PSU $\alpha$ of stratum $h$ assigns weight zero to that PSU's respondents, multiplies the weights of the remaining respondents in stratum $h$ by $a_h/(a_h-1)$, and leaves other strata unchanged. Writing $\hat{\boldsymbol\theta}_{(h\alpha)}$ for the estimator recomputed on those weights,
+
+$$\widehat{\mathbf V}(\hat{\boldsymbol\theta}) = \sum_{h=1}^{H}\frac{a_h-1}{a_h}
+\sum_{\alpha=1}^{a_h}
+\big(\hat{\boldsymbol\theta}_{(h\alpha)}-\hat{\boldsymbol\theta}\big)
+\big(\hat{\boldsymbol\theta}_{(h\alpha)}-\hat{\boldsymbol\theta}\big)^{\!\top},
+\qquad
+\nu = \sum_{h} a_h - H ,$$
+
+where $\nu$ is the design degrees of freedom, PSUs minus strata, used for every $t$ reference in this document rather than a normal quantile.
+
+Replication is a choice here, not a necessity: a pseudo-likelihood does admit a sandwich variance [@binder1983], and that is what Mplus and Stata compute under survey estimation. We choose replication for three reasons specific to this problem. The parameter vector is moderate here, 59 free parameters at $K=4$, but grows linearly in $K$ and in the number of response categories, it carries many parameters at or near the boundary, and the linearized sandwich requires inverting an information matrix of that dimension at every stage where a new statistic is wanted. Replication propagates to new statistics without rederivation: once the replicate weights exist, the domain estimates of @sec-domains inherit design-based variance by recomputation, where linearization would need a fresh delta-method derivation at each stage. And replication makes the design specification auditable, since a misspecified cluster identifier changes the replicate structure visibly.
+
+Each replicate refits the weighted EM on the replicate weights, warm-started from the full-sample solution and aligned to it by the alignment criterion above. The resulting variance is therefore **within-mode** by construction: it expresses design variance around the reported solution, not uncertainty about which mode the likelihood surface should have selected.
+
+A stratum containing a single PSU cannot receive the $a_h/(a_h-1)$ scaling. The `survey.lonely.psu` option governs linearization variance and does not change how replicate weights are constructed, so a singleton stratum would contribute no variance and the resulting standard errors would be anticonservative in exactly the strata where the data are thinnest. The workflow therefore treats singleton strata as a hard stop, and performs the check on the analysis frame rather than the released file, because case exclusions can create singletons the provider's data does not have.
+
+Intervals for every probability are formed on the logit scale by the delta method. Since $\mathrm{d}\,\mathrm{logit}(p)/\mathrm{d}p = 1/\{p(1-p)\}$,
+
+$$\mathrm{se}_{\mathrm{logit}}(\hat p) = \frac{\mathrm{se}(\hat p)}{\hat p(1-\hat p)},
+\qquad
+\mathrm{CI} = \mathrm{logit}^{-1}\!\big(\mathrm{logit}(\hat p) \pm t_{0.975,\nu}\,
+\mathrm{se}_{\mathrm{logit}}(\hat p)\big),$$
+
+the interval above keeps intervals inside $(0,1)$ without truncation and improves coverage near the boundary. Estimates within $10^{-3}$ of a boundary have no meaningful logit-scale standard error and receive Wald intervals truncated to $[0,1]$, flagged in the delivered tables.
+
+```{r design}
+#| eval: !expr K_ready
+design <- build_rep_design(dat, cfg)
+des <- design$des
+rep_des <- design$rep_des
+nu <- degf(rep_des)
+crit <- qt(0.975, df = nu)
+
+glue("Design: {ncol(rep_des$repweights)} replicates, ",
+         "{nu} degrees of freedom.")
+```
+
+```{r jackknife}
+#| eval: !expr K_ready
+# Parameter bookkeeping, in the order flatten_fit() produces.
+param_meta <- bind_rows(
+  tibble(kind = "pi", item = NA_character_, category = NA_integer_,
+         segment = seq_len(K_star)),
+  imap(cats, function(Cj, item_name)
+    expand_grid(segment = seq_len(K_star), category = seq_len(Cj)) |>
+      transmute(kind = "rho", item = item_name, category, segment)) |>
+    list_rbind())
+
+flatten_fit <- function(fit) c(fit$pi, unlist(map(fit$rho, as.vector)))
+
+theta_fun <- function(w_rep) {
+  fit <- em_run(inp$Y, inp$OH, cats, w_rep, K_star,
+                init = fit_w[c("pi", "rho")], maxit = 1000L, tol = 1e-10)
+  flatten_fit(align_to(fit, fit_w))
+}
+
+est_vec <- flatten_fit(fit_w)
+se_vec <- sqrt(diag(replicate_variance(rep_des, theta_fun, est_vec)))
+
+ci_tbl <- param_meta |>
+  mutate(estimate = as.numeric(est_vec), se = as.numeric(se_vec),
+         boundary = estimate < 1e-3 | estimate > 1 - 1e-3,
+         p_c = pmin(pmax(estimate, 1e-6), 1 - 1e-6),
+         gse = se / (p_c * (1 - p_c)),
+         lo = if_else(boundary, pmax(0, estimate - crit * se),
+                      plogis(qlogis(p_c) - crit * gse)),
+         hi = if_else(boundary, pmin(1, estimate + crit * se),
+                      plogis(qlogis(p_c) + crit * gse))) |>
+  select(-p_c, -gse)
+```
+
+# Fit diagnostics {#sec-diagnostics}
+
+The chosen model is diagnosed before it is named or interpreted. Three questions are asked in order: does each item separate the segments, does each item earn the parameters it costs, and does the local independence assumption of the mixture above hold pairwise. A model that fails these is refit at a different $K$ or with items removed, and only a model that passes proceeds to @sec-labeling.
+
+Two questions get asked of every item. The first is how much it separates the segments, measured as the mean over segment pairs of the total variation distance between their conditional response distributions:
+
+$$D_j = \frac{2}{K(K-1)}\sum_{k<l}\frac{1}{2}\sum_{c=1}^{C_j}
+\big|\rho_{jck} - \rho_{jcl}\big| .$$
+
+The inner expression is total variation distance between two discrete distributions, bounded in $[0,1]$ and equal to the largest difference in probability the two assign to any event; the leading factor is the reciprocal of the number of pairs, $K(K-1)/2$, so $D_j$ is a mean of quantities each in $[0,1]$ and is itself in $[0,1]$. A value of zero means every segment answers item $j$ identically, making it a candidate for removal in a sensitivity refit; values near one mean the item alone nearly determines segment membership. Because it is a distance between distributions it is bounded in $[0,1]$ whatever the number of response categories, so a binary item and a seven-point item are on the same scale. It is also sensitive to shape rather than only to location: a segment that avoids the middle of a scale registers here even when its average answer sits where everyone else's does, which suits a model that treats the categories as unordered.
+
+The second question is how far the expected response actually travels, reported alongside as `range` and scaled by the number of categories so a two-point and a four-point item are comparable. This assumes the categories are ordered, which the model does not, but it is what an analyst reads off a profile plot. The two usually agree. Where they do not, the item is doing something worth looking at.
+
+Reported with them is the balance between level and pattern across the whole battery: how much the segments differ in how high they answer overall, against how much they differ in which items they favour. Each item is rescaled to run from zero to one first, so a four-category item does not contribute more possible spread than a binary one. A ratio well below one says the segments are cut points on a single continuum, which a factor model would describe with far fewer parameters. Near or above one says they reorder the items, which is structure no single factor can hold, and it is the case this model is for.
+
+```{r item-discrimination}
+#| eval: !expr K_ready
+item_discrim <- item_discrimination(fit_w, cfg$items)
+
+item_discrim |>
+  mutate(across(c(discrimination, range), function(x) round(x, 3))) |>
+  lca_table(col.names = c("Item", "Discrimination", "Range"), align = "lrr",
+            widths = c("14em", "9em", "6em"),
+            caption = "Two views of how much each item separates the segments.")
+
+ratio_tbl <- level_pattern_ratio(fit_w, cfg$items)
+glue("Level and pattern: between-segment SD of overall level ",
+         "{round(ratio_tbl$sd_level, 3)}, SD of item-specific deviation from that ",
+         "level {round(ratio_tbl$sd_pattern, 3)}, ratio {round(ratio_tbl$ratio, 2)}.")
+```
+
+Local independence is probed pairwise. For items $a$ and $b$, let $\widehat P_{ab}(c,d)$ be the design-weighted observed proportion giving response $c$ to item $a$ and $d$ to item $b$, and let
+
+$$\Pi_{ab} = \boldsymbol\rho_a \operatorname{diag}(\boldsymbol\pi)\,
+\boldsymbol\rho_b^{\top}$$
+
+be the model-implied joint distribution, where $\boldsymbol\rho_a$ is the $C_a\times K$ matrix of conditional probabilities for item $a$. the model-implied table above is the model's own statement about the pair: condition on segment, multiply the two conditional distributions because the model asserts they are independent given segment, and average over segments weighted by prevalence. The bivariate residual is the total variation distance between observed and implied,
+
+$$\mathrm{BVR}_{ab} = \frac{1}{2}\sum_{c,d}
+\big|\widehat P_{ab}(c,d) - \Pi_{ab}(c,d)\big| \in [0,1].$$
+
+This departs from the Pearson-type statistic conventionally reported, and deliberately. @oberski2013 showed that the Pearson statistic's null distribution is already not chi-square for unweighted binary data, recommending bootstrap calibration; under design weighting and a pseudo-likelihood on a clustered sample no reference distribution is valid at all. A Rao-Scott design adjustment would repair the design component but not the fact that the residual's null is not chi-square even under simple random sampling, so it does not rescue the statistic here. A statistic without a null distribution is an effect size, and an effect size should sit on an interpretable scale: the residual above is bounded in $[0,1]$, is exactly zero under perfect local independence, reads as the largest probability discrepancy over any event in the two-way table, and shares its scale with the discrimination formula above. It also removes a numerical failure of the Pearson form, which divides by the model-implied cell probability and so can be dominated by a single near-empty corner of a large table.
+
+```{r bvr-table}
+#| eval: !expr K_ready
+bvr_tbl <- bvr_pairs(dat, w_vec, cfg$items, fit_w)
+
+bvr_tbl |>
+  mutate(bvr = round(bvr, 3)) |>
+  slice_head(n = 10) |>
+  lca_table(align = "llr", col.names = c("Item A", "Item B", "BVR"),
+            widths = c("14em", "14em", "6em"),
+            caption = "Ten largest bivariate residuals. A ranking, not a test.")
+```
+
+```{r bvr-heatmap}
+#| echo: false
+#| eval: !expr K_ready
+#| fig-height: 8
+#| fig-cap: "The same residuals as a heatmap. Darker cells are item pairs whose association the segments explain least well. Persistent dark pairs argue for dropping or merging an item, or trying K+1."
+bvr_tbl |>
+  mutate(item_a = factor(item_a, levels = cfg$items),
+         item_b = factor(item_b, levels = cfg$items)) |>
+  ggplot(aes(item_a, item_b, fill = bvr)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", bvr)), size = 2.0) +
+  scale_fill_viridis_c(name = "BVR", direction = -1) +
+  labs(x = NULL, y = NULL) +
+  theme_lca() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Validation against an independent implementation {#sec-validation}
+
+At unit weights, the pseudo-log-likelihood above reduces to the ordinary log-likelihood, so the weighted EM and `poLCA` [@linzer2011] maximize the same function and must agree up to optimizer tolerance and mode selection. This is enforced as a runtime check rather than asserted.
+
+The comparison fits a third candidate by warm-starting our own EM at the `poLCA` solution, so whichever basin attains the higher log-likelihood is retained and the comparison is between optima rather than between stopping rules. Where a gap appears, the two log-likelihoods separate the possible causes: equal log-likelihoods with different parameters indicate drift along a flat ridge under the stopping rule, a higher log-likelihood here indicates an inferior `poLCA` mode, and a higher log-likelihood there indicates our own search needs more starts.
+
+This check validates estimation. It says nothing about the variance implementation of @sec-variance, which is a separate concern and a reason to inspect the replicate diagnostics rather than treat agreement here as global.
+
+```{r polca}
+#| eval: !expr K_ready
+polca_df <- dat |> select(all_of(cfg$items)) |> as.data.frame()
+polca_f <- as.formula(paste0("cbind(", paste(cfg$items, collapse = ", "), ") ~ 1"))
+
+set.seed(cfg$seed + 7L)
+pl <- poLCA(polca_f, data = polca_df, nclass = K_star, nrep = 10,
+            maxiter = 5000, na.rm = TRUE, verbose = FALSE)
+pl_aligned <- align_to(list(pi = as.numeric(pl$P), rho = map(pl$probs, t),
+                            post = pl$posterior), fit_w)
+
+fit_from_pl <- em_run(inp$Y, inp$OH, cats, rep(1, n_obs), K_star,
+                      init = list(pi = pl_aligned$pi, rho = pl_aligned$rho),
+                      maxit = 5000L, tol = 1e-10)
+fit_unit <- if (fit_from_pl$ll > fit_u$ll) align_to(fit_from_pl, fit_w) else fit_u
+
+validation <- tibble(
+  max_pi_gap = max(abs(fit_unit$pi - pl_aligned$pi)),
+  max_rho_gap = max(map2_dbl(fit_unit$rho, pl_aligned$rho, \(a, b) max(abs(a - b)))))
+validation$match <- max(validation$max_pi_gap, validation$max_rho_gap) < 0.005
+
+cat(sprintf(paste0("VALIDATION (unit weights, our EM vs poLCA):\n",
+                   "  max |prevalence gap|              = %.5f\n",
+                   "  max |conditional-probability gap| = %.5f\n",
+                   "  log-likelihood ours = %.4f | poLCA = %.4f\n  -> %s\n"),
+            validation$max_pi_gap, validation$max_rho_gap, fit_unit$ll, pl$llik,
+            if (validation$match) "MATCH: implementations agree."
+            else "MISMATCH: investigate before trusting the weighted fit."))
+```
+
+# Naming the segments {#sec-labeling}
+
+Segment naming is drafted by a language model under a fixed instrument and is a convenience with an audited override path, not a measurement claim. Recent evidence suggests language models perform annotation-adjacent tasks reliably when tightly instructed [@gilardi2023; @ziems2024], which is the narrow basis on which the step is used here. In TSE terms it is a processing step (@sec-tse): it occurs after every number is computed, produces a display string, and never enters a computation, so a wrong name is a presentation error rather than a statistical one.
+
+The instrument comprises a persona and rule set directing interpretation strictly from the displayed conditional response probabilities and item wording, one isolated call per segment, an optional survey-context paragraph fenced to referent resolution only, and a collision-gated harmonization pass that may edit labels but never descriptions. Isolation is empirical: joint prompts, in which the model sees all segments at once and must assign names one-to-one, confused near-neighbor segments and allowed a single confusion to corrupt two labels.
+
+Reproducibility rests on a freeze file rather than a sampling seed. When `segment_labels.csv` exists in the output directory it is used and validated against $K$; otherwise the model drafts once and writes it. Editing the file is how the analyst takes over naming, and deleting it triggers a redraft. A seed would make the draft reproducible only for a fixed model, endpoint, and package version; the file is reproducible unconditionally.
+
+Labels are drafts. Naming happens only after the diagnostics of @sec-diagnostics and the validation of @sec-validation have been read, and each label must be verified against its profile panel in @fig-profiles before it is quoted.
+
+```{r prompt-example}
+#| echo: false
+#| eval: !expr K_ready
+cat("=========== SYSTEM PROMPT ===========\n")
+cat(wrap_text(persona_lca), "\n\n")
+cat("=========== USER PROMPT (segment 1) ===========\n")
+cat(wrap_text(prompt_segment_label(fit_w, 1, dictionary, cfg$items,
+                                  cfg$survey_context)), "\n")
+```
+
+```{r segment-labels}
+#| eval: !expr K_ready
+segment_labels <- get_segment_labels(fit_w, dictionary, cfg$items, cfg)
+
+lca_table(segment_labels, widths = c("2em", "11em", "28em"),
+          caption = "Segment labels and descriptions in use. Drafts, to verify against the response profiles below.")
+
+lab_lev <- str_wrap(paste0("S", segment_labels$K, ": ", segment_labels$Label), 22)
+lab_of <- function(k) factor(lab_lev[k], levels = lab_lev)
+lab_line <- function(k) paste0("S", k, ": ", segment_labels$Label[k])
+lab_short <- function(k) paste0("S", k)
+```
+
+# The measurement model
+
+```{r tbl-prevalence}
+#| echo: false
+#| eval: !expr K_ready
+pi_ci <- ci_tbl |>
+  filter(kind == "pi") |>
+  transmute(K = segment, est = estimate, lo, hi)
+
+pi_ci |>
+  mutate(Segment = lab_line(K),
+         `Weighted prevalence [95% CI]` = sprintf("%.3f [%.3f, %.3f]", est, lo, hi),
+         `Unweighted` = sprintf("%.3f", fit_u$pi[K]),
+         Gap = sprintf("%+.3f", est - fit_u$pi[K])) |>
+  select(Segment:Gap) |>
+  lca_table(align = "lrrr", widths = c("13em", "13em", "8em", "5em"),
+            caption = "Segment prevalences, design-weighted with 95 percent JKn intervals, against the unweighted fit.")
+```
+
+The figure below is the measurement model drawn out, and it is the latent class counterpart of a path diagram: one node for the latent variable, one label per item, and an edge whose weight stands where a loading would.
+
+The number on each edge is that item's discrimination, and it reads as an average probability gap. A value of 0.85 means that two segments picked at random differ, on average, by 85 percentage points in how they answer that item, so the item nearly determines membership on its own. A value of 0.14 means they barely differ and the item is carrying almost nothing. The scale runs from 0 to 1 whatever the number of response categories, which is what makes a binary item and a four-category item comparable on the same picture. Edge thickness encodes the same number, so the diagram can be read at a glance and the labels checked afterwards.
+
+What the edges cannot show is that these are estimates. The intervals for every conditional probability behind them are in the exported measurement model file.
+
+```{r fig-lca-diagram}
+#| eval: !expr K_ready
+#| echo: false
+#| fig-height: 5.2
+#| fig-cap: "The measurement model. Each edge carries that item's discrimination: the average probability gap between two segments on it, from 0 to 1."
+J <- length(cfg$items)
+edges <- item_discrim |>
+  mutate(item = factor(item, levels = rev(item)), y = as.integer(item),
+         x0 = 0.12, x1 = 0.62)
+
+seg_txt <- pi_ci |>
+  mutate(txt = sprintf("%s  %.2f", lab_short(K), est)) |>
+  pull(txt) |>
+  paste(collapse = "\n")
+
+ggplot(edges) +
+  geom_curve(aes(x = x0, y = (J + 1) / 2, xend = x1, yend = y,
+                 linewidth = discrimination, alpha = discrimination),
+             curvature = 0.12, colour = viridisLite::viridis(1, begin = 0.45)) +
+  geom_label(aes(x = 0.40, y = (y + (J + 1) / 2) / 2, label = sprintf("%.2f", discrimination)),
+             size = 2.2, label.size = 0, fill = "white") +
+  geom_text(aes(x = x1 + 0.02, y = y, label = item), hjust = 0, size = 2.9) +
+  annotate("label", x = 0.12, y = (J + 1) / 2,
+           label = glue("Segment\nK = {K_star}\n\n{seg_txt}"),
+           size = 2.6, lineheight = 1.1, label.r = unit(8, "pt"),
+           fill = "grey96", label.padding = unit(6, "pt")) +
+  scale_linewidth(range = c(0.2, 2.2)) +
+  scale_alpha(range = c(0.25, 0.9)) +
+  scale_x_continuous(limits = c(0, 1.05)) +
+  scale_y_continuous(limits = c(0.3, J + 0.7)) +
+  labs(x = NULL, y = NULL) +
+  theme_void() +
+  theme(legend.position = "none")
+```
+
+```{r fig-profile-lines}
+#| eval: !expr K_ready
+#| echo: false
+#| fig-height: 4.2
+#| fig-cap: "Segment profiles. Each item's expected response is scaled to run from 0 to 1 so a binary and a four-category item are comparable. Lines that stay parallel mean the segments differ only in how high they answer overall, which a single continuum would describe. Lines that cross mean the segments reorder the items, which is what a class model recovers and a factor model cannot."
+map(seq_len(K_star), function(k)
+  tibble(segment = k, item = cfg$items,
+         m = map_dbl(fit_w$rho, function(r)
+           (sum(seq_len(nrow(r)) * r[, k]) - 1) / (nrow(r) - 1)))) |>
+  list_rbind() |>
+  mutate(item = factor(item, levels = cfg$items), Segment = lab_of(segment)) |>
+  ggplot(aes(item, m, color = Segment, group = Segment)) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1.8) +
+  scale_color_viridis_d(begin = 0.1, end = 0.85) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(x = NULL, y = "Expected response, scaled") +
+  theme_lca() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r fig-profiles}
+#| echo: false
+#| eval: !expr K_ready
+#| fig-width: 8
+#| fig-height: 7.5
+#| fig-cap: "Conditional response probabilities P(response | segment) for every item, the parameters estimated by the formula above. Rows are items, columns are response categories."
+ci_tbl |>
+  filter(kind == "rho") |>
+  mutate(Segment = lab_of(segment), item = factor(item, levels = cfg$items)) |>
+  ggplot(aes(factor(category), item, fill = estimate)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", estimate)), size = 2.1) +
+  scale_fill_viridis_c(name = "P", limits = c(0, 1)) +
+  facet_wrap(~ Segment, ncol = min(3, K_star)) +
+  labs(x = "Response category", y = NULL) +
+  theme_lca() +
+  theme(axis.text.y = element_text(size = 7))
+```
+
+# Scoring segment membership {#sec-scoring}
+
+Local independence makes assignment exact rather than approximate for item-partial respondents. A missing item drops out of the within-segment product, so for respondent $i$ with answered item set $A_i$,
+
+$$p^{\mathrm{obs}}_{ik} = \frac{\pi_k \prod_{j\in A_i}\rho_{j\,y_{ij}\,k}}
+{\sum_{l}\pi_l \prod_{j\in A_i}\rho_{j\,y_{ij}\,l}},
+\qquad
+\hat X_i = \arg\max_k p^{\mathrm{obs}}_{ik} ,$$
+
+the posterior above is the exact posterior given what respondent $i$ actually answered, under the model and under ignorability of the missingness pattern given segment. An information floor `cfg$min_items` is enforced: respondents answering fewer items receive no assignment rather than a weakly informed one.
+
+Scoring precedes domain estimation, and all domain estimation runs on the scored frame rather than the estimation sample. This follows the logic of three-step latent class analysis, in which the assignment step covers every respondent it validly can, and it matters substantively rather than cosmetically: item nonresponse on an attitude battery correlates with education, age, and other characteristics of interest, so restricting domain estimation to complete responders introduces a selection into exactly the composition being estimated. This is the item-level nonresponse concern of @sec-tse.
+
+The cost, and it is the correlated-error case noted there, is that respondents scored from fewer items carry flatter posteriors and therefore more classification error than those scored from all items. The replicate design is rebuilt on the scored frame and the singleton stratum check is repeated there.
+
+```{r score}
+#| eval: !expr K_ready
+pred <- predict_segments(survey_dat_full, fit_w, cfg$items, cfg$min_items)
+survey_scored <- bind_cols(survey_dat_full, pred)
+post_cols <- paste0("post_segment", seq_len(K_star))
+
+scored <- survey_scored |>
+  filter(!is.na(segment)) |>
+  mutate(segment = factor(segment, levels = seq_len(K_star)))
+
+design_s <- build_rep_design(scored, cfg)
+des_s <- design_s$des
+rep_des_s <- design_s$rep_des
+nu_s <- degf(rep_des_s)
+crit_s <- qt(0.975, df = nu_s)
+
+glue(
+  "Estimation sample: {n_obs} item-complete cases.\n",
+  "Scored sample: {nrow(scored)} of {nrow(survey_scored)} respondents ",
+  "(floor: {cfg$min_items} items), a gain of {nrow(scored) - n_obs}.\n",
+  "Domain design: {ncol(rep_des_s$repweights)} replicates, ",
+  "{nu_s} degrees of freedom.")
+```
+
+```{r score-quality}
+#| echo: false
+#| eval: !expr K_ready
+scored |>
+  group_by(n_items_answered) |>
+  summarise(n = n(), mean_max_posterior = round(mean(max_posterior), 3),
+            .groups = "drop") |>
+  lca_table(align = "rrr", widths = c("10em", "6em", "12em"),
+            col.names = c("Items answered", "n", "Mean max posterior"),
+            caption = "Assignment quality by number of items answered. Respondents scored from fewer items carry flatter posteriors and so more classification error. If the mean falls sharply at the low end, raise cfg$min_items.")
+```
+
+# Domain estimation {#sec-domains}
+
+The quantity of interest is segment prevalence within demographic domains. Writing $d$ for a level of a demographic variable,
+
+$$\hat p_{dk} = \frac{\sum_{i\in d} w_i \,\mathbf 1(\hat X_i = k)}
+{\sum_{i\in d} w_i},$$
+
+the design-weighted proportion of domain $d$ assigned to segment $k$. the domain estimator above takes its variance from the same JKn replicates as the jackknife variance above. In implementation this is `svyby` over the demographic with `svymean` of the segment factor inside each level, so the estimate and its variance come from the replicate design directly. Rows sum to one across segments by construction, which means the cells within a row are not independent: if one segment's share rises, others must fall.
+
+### Three estimators
+
+Each domain table carries the same quantity three ways, so the two corrections can be read separately. **Unweighted** is a plain cross-tab: sample proportions with binomial standard errors, as if the respondents had been drawn independently. **Design-based** applies the sampling weights and takes its variance from the JKn replicates. **BCH** additionally removes the attenuation that hard modal assignment introduces. The gap from the first row to the second is what ignoring the design costs; the gap from the second to the third is what modal assignment costs.
+
+### The correction
+
+This estimator uses hard modal assignment and is therefore **attenuated**. Classification error pulls composition toward the marginal distribution, so differences between demographic levels are understated [@bolck2004; @vermunt2010]. The direction is what makes this tractable: a difference that survives modal assignment is real, while a null under modal assignment may be a genuine difference that classification error erased. The BCH correction removes it [@bolck2004; @vermunt2010; @bakk2013; @bakk2014].
+
+```{r domain-estimates}
+#| eval: !expr K_ready
+marginals <- map(cfg$aux, function(v) {
+  m <- svymean(reformulate(v), rep_des_s, na.rm = TRUE)
+  raw <- scored |>
+    filter(!is.na(.data[[v]])) |>
+    count(.data[[v]], name = "n") |>
+    set_names(c("level", "n"))
+  tibble(variable = v,
+         level = str_remove(names(coef(m)), paste0("^", v)),
+         weighted = as.numeric(coef(m)),
+         se = as.numeric(SE(m))) |>
+    left_join(mutate(raw, level = as.character(level)), by = "level")
+}) |>
+  list_rbind()
+
+# svyby splits the design by the demographic and runs svymean(~segment) within
+# each level. Columns are read by position (by-variable, then K estimates, then
+# K SEs) because svyby's naming for a factor outcome varies by version.
+domain <- map(cfg$aux, function(v) {
+  sb <- as.data.frame(svyby(~ segment, reformulate(v), rep_des_s, svymean,
+                            na.rm = TRUE))
+  vals <- sb[, -1, drop = FALSE]
+  stopifnot(ncol(vals) == 2 * K_star)
+  tibble(variable = v,
+         level = rep(as.character(sb[[1]]), times = K_star),
+         segment = rep(seq_len(K_star), each = nrow(sb)),
+         p = as.numeric(as.matrix(vals[, seq_len(K_star)])),
+         se = as.numeric(as.matrix(vals[, K_star + seq_len(K_star)])))
+}) |>
+  list_rbind() |>
+  filter(!is.na(level)) |>
+  mutate(lo = pmax(0, p - crit_s * se), hi = pmin(1, p + crit_s * se))
+
+# BCH. Posteriors and modal assignment stay at their full-sample values; D and
+# the correction weights are rebuilt inside every replicate, so the intervals
+# carry the design variance of the classification table and the cross-tab
+# together rather than treating D as known.
+P_fixed <- as.matrix(scored[, post_cols, drop = FALSE])
+modal_fixed <- as.integer(scored$segment)
+
+dom_meta <- map(cfg$aux, function(v)
+  expand_grid(level = levels(scored[[v]]), segment = seq_len(K_star)) |>
+    mutate(variable = v)) |>
+  list_rbind() |>
+  mutate(idx = row_number())
+
+domain_theta <- function(w_rep) {
+  wU = w_rep * bch_weights(P_fixed, modal_fixed, w_rep)
+  unlist(map(cfg$aux, function(v) {
+    M = outer(as.character(scored[[v]]), levels(scored[[v]]), "==") + 0
+    M[is.na(M)] = 0
+    as.vector(t(crossprod(M, wU) / as.numeric(crossprod(M, w_rep))))
+  }), use.names = FALSE)
+}
+
+dom_est <- domain_theta(weights(des_s, "sampling"))
+dom_se <- sqrt(diag(replicate_variance(rep_des_s, domain_theta, dom_est)))
+stopifnot(length(dom_est) == nrow(dom_meta))
+
+domain_bch <- dom_meta |>
+  mutate(p = as.numeric(dom_est), se = as.numeric(dom_se),
+         lo = p - crit_s * se, hi = p + crit_s * se) |>
+  select(variable, level, segment, p, se, lo, hi)
+
+
+# Design-based estimator as a theta function, so the full replicate covariance
+# between domain estimates exists. The separations are Wald contrasts on this
+# covariance rather than an interval-overlap rule, which tested at an alpha
+# well below its nominal level. Design-based rather than BCH is deliberate:
+# modal assignment attenuates differences, so a pair resolved here separates
+# despite the classification error.
+S_fixed <- outer(modal_fixed, seq_len(K_star), `==`) + 0
+
+domain_theta_dsg <- function(w_rep) {
+  unlist(map(cfg$aux, function(v) {
+    M = outer(as.character(scored[[v]]), levels(scored[[v]]), "==") + 0
+    M[is.na(M)] = 0
+    as.vector(t(crossprod(M, w_rep * S_fixed) / as.numeric(crossprod(M, w_rep))))
+  }), use.names = FALSE)
+}
+
+dom_est_dsg <- domain_theta_dsg(weights(des_s, "sampling"))
+V_dsg <- replicate_variance(rep_des_s, domain_theta_dsg, dom_est_dsg)
+
+# The same quantity svyby computed, by a different route; agreement validates
+# the read-by-position handling of svyby's output.
+chk <- dom_meta |>
+  mutate(p_theta = dom_est_dsg) |>
+  inner_join(select(domain, variable, level, segment, p),
+             by = c("variable", "level", "segment"))
+stopifnot(max(abs(chk$p_theta - chk$p)) < 1e-6)
+
+wald_dsg <- list(meta = dom_meta, est = dom_est_dsg, V = V_dsg, df = nu_s)
+
+
+# Naive estimates: unweighted proportions with binomial standard errors, as if
+# the respondents were an iid sample. This is what a plain cross-tab gives, and
+# it is here so the two corrections can be read separately: the gap to the
+# design-based row is what ignoring the design costs, and the gap from there to
+# the BCH row is what modal assignment costs.
+domain_naive <- map(cfg$aux, function(v) {
+  scored |>
+    filter(!is.na(.data[[v]])) |>
+    count(.data[[v]], segment, name = "n", .drop = FALSE) |>
+    set_names(c("level", "segment", "n")) |>
+    group_by(level) |>
+    mutate(n_level = sum(n), p = n / n_level) |>
+    ungroup() |>
+    transmute(variable = v, level = as.character(level),
+              segment = as.integer(segment), p,
+              se = sqrt(p * (1 - p) / n_level),
+              lo = pmax(0, p - qnorm(0.975) * se),
+              hi = pmin(1, p + qnorm(0.975) * se))
+}) |>
+  list_rbind() |>
+  arrange(variable, segment, level)
+
+# the shift summaries below difference these row by row, so put all three in the
+# same order first
+domain <- arrange(domain, variable, segment, level)
+domain_bch <- arrange(domain_bch, variable, segment, level)
+
+est_levels <- c("Unweighted", "Design-based", "BCH")
+
+domain_both <- bind_rows(mutate(domain_naive, estimator = "Unweighted"),
+                         mutate(domain, estimator = "Design-based"),
+                         mutate(domain_bch, estimator = "BCH")) |>
+  mutate(estimator = factor(estimator, levels = est_levels))
+
+# Cells at an observed 0 or 1 have a zero binomial standard error, so the
+# ratio there is 0/0. Those cells say nothing about the clustering cost and
+# are excluded from the median rather than allowed to poison it.
+se_ratio <- domain$se / domain_naive$se
+
+cat(sprintf(paste0("Weighting moves the point estimates by a median of %.4f; 
+                   the BCH\n",
+                   "correction moves them a further %.4f, at most %.4f, 
+                   against a median\n",
+                   "design-based standard error of %.4f. Read each shift 
+                   against that\n",
+                   "standard error: one well inside it is not moving 
+                   anything the design\n",
+                   "can resolve. The design-based standard errors are a 
+                   median of %.2f\n",
+                   "times the naive ones, which is what ignoring the 
+                   clustering costs.\n"),
+            median(abs(domain$p - domain_naive$p)),
+            median(abs(domain_bch$p - domain$p)), 
+            max(abs(domain_bch$p - domain$p)),
+            median(domain$se), median(se_ratio[is.finite(se_ratio)])))
+
+```
+
+Before anything is sent, R tests every pair of levels within each segment: a design-based Wald test on the difference, using the replicate covariance between the two estimates, Holm-adjusted across the pairs within the demographic. The model is handed the list of pairs that resolve and told to name only those. The tests run on the design-based estimator deliberately, since its attenuation means a difference resolved there separates despite the classification error, and the corrected columns can only widen it.
+
+```{r}
+#| eval: !expr K_ready
+# The BCH intervals above hold the step-one measurement model fixed. This
+# refits the model inside every replicate and lets the replicate's own
+# posteriors drive the classification table and the cross-tab, so step-one
+# uncertainty enters the variance. One demographic keeps the cost at one EM
+# refit per replicate; the ratio, not the coverage, is the deliverable.
+idx_est <- which(scored$in_analysis)
+Y_sc <- map(cfg$items, function(it) as.integer(scored[[it]]))
+aux_s1 <- cfg$aux[1]
+
+theta_step1 <- function(w_rep) {
+  fit_r = align_to(em_run(inp$Y, inp$OH, cats, w_rep[idx_est], K_star,
+                          init = fit_w[c("pi", "rho")],
+                          maxit = 1000L, tol = 1e-10), fit_w)
+  post_r = posterior_of(fit_r$pi, fit_r$rho, Y_sc)
+  modal_r = max.col(post_r, ties.method = "first")
+  wU = w_rep * bch_weights(post_r, modal_r, w_rep)
+  unlist(map(aux_s1, function(v) {
+    M = outer(as.character(scored[[v]]), levels(scored[[v]]), "==") + 0
+    M[is.na(M)] = 0
+    as.vector(t(crossprod(M, wU) / as.numeric(crossprod(M, w_rep))))
+  }), use.names = FALSE)
+}
+
+est_s1 <- theta_step1(weights(des_s, "sampling"))
+Wm_s <- weights(rep_des_s, type = "analysis")
+Theta_s1 <- do.call(rbind, future_map(seq_len(ncol(Wm_s)), function(r) {
+  out = try(theta_step1(Wm_s[, r]), silent = TRUE)
+  if (inherits(out, "try-error")) rep(NA_real_, length(est_s1)) else out
+}, .options = furrr_options(seed = NULL)))
+ok <- complete.cases(Theta_s1)
+d_s1 <- sweep(Theta_s1[ok, , drop = FALSE], 2, est_s1, "-")
+se_s1 <- sqrt(diag(rep_des_s$scale * crossprod(d_s1 * sqrt(rep_des_s$rscales[ok]))))
+
+s1_tbl <- dom_meta |>
+  filter(variable %in% aux_s1) |>
+  mutate(se_step1 = se_s1) |>
+  inner_join(select(domain_bch, variable, level, segment, p, se),
+             by = c("variable", "level", "segment")) |>
+  mutate(ratio = se_step1 / se)
+
+glue("Replicates converged: {sum(ok)} of {nrow(Theta_s1)}. ",
+     "Propagating step one multiplies the BCH standard errors for {aux_s1} ",
+     "by a median of {round(median(s1_tbl$ratio, na.rm = TRUE), 2)} ",
+     "and at most {round(max(s1_tbl$ratio, na.rm = TRUE), 2)}.")
+
+s1_tbl |>
+  transmute(Segment = lab_line(segment), Level = level,
+            `SE fixed` = sprintf("%.4f", se),
+            `SE propagated` = sprintf("%.4f", se_step1),
+            Ratio = sprintf("%.2f", ratio)) |>
+  lca_table(align = "llrrr", widths = fit_widths(5, first = 2.4), font_size = 8,
+            caption = "BCH standard errors with the step-one measurement model fixed against refit within every replicate, for one demographic.")
+```
+
+```{r domain-pages}
+#| echo: false
+#| eval: !expr K_ready
+#| results: asis
+#| fig-height: 7
+walk(cfg$aux, function(v) {
+  tag <- str_replace_all(v, "_", "-")
+  lv <- unique(filter(domain, variable == v)$level)
+  cat("\n\n##", v, "\n\n")
+
+  marginals |>
+    filter(variable == v) |>
+    transmute(Level = level, n, Share = sprintf("%.3f (%.3f)", weighted, se)) |>
+    lca_table(align = "lrr", widths = fit_widths(3, first = 2),
+              label = paste0("comp-", tag),
+              caption = paste0("Composition by ", v,
+                               ": design-weighted proportion among respondents ",
+                               "who answered the item, with its JKn standard error.")) |>
+    cat(sep = "\n")
+  cat("\n\n")
+
+  small_lv <- marginals |>
+    filter(variable == v, n < 30) |>
+    pull(level)
+  
+  domain_both |>
+    filter(variable == v) |>
+    transmute(Segment = lab_line(segment), Estimator = estimator,
+              Level = if_else(level %in% small_lv, paste0(level, "*"), level),
+              cell = sprintf("%.3f (%.3f)%s", p, se,
+                             if_else(p < 0 | p > 1, "\u2020", ""))) |>
+    pivot_wider(names_from = Level, values_from = cell) |>
+    arrange(Segment, Estimator) |>
+    lca_table(align = str_c("l", strrep("r", length(lv))),
+              widths = fit_widths(2 + length(lv), first = 2.4),
+              font_size = 7,
+              label = paste0("dom-", tag),
+              caption = paste0("Share of each level of ", v,
+                               " falling in each segment under three 
+                               estimators, ",
+                               "with standard errors. Unweighted is a plain ",
+                               "cross-tab with a binomial standard error. ",
+                               "Design-based adds the weights and takes its ",
+                               "variance from the JKn replicates. 
+                               BCH additionally ",
+                               "removes the attenuation that modal assignment ",
+                               "introduces. Columns sum to one down the 
+                               segments. ",
+                               "* fewer than 30 respondents; not a finding. ",
+                               "\u2020 outside [0, 1], which the BCH 
+                               correction ",
+                               "permits and truncation would misstate.")) |>
+    cat(sep = "\n")
+  
+  
+  cat("\n\n")
+
+  p <- domain_both |>
+    filter(variable == v) |>
+    mutate(Segment = lab_of(segment), Level = factor(level, levels = rev(lv))) |>
+    ggplot(aes(p, Level, color = estimator, shape = estimator)) +
+    geom_pointrange(aes(xmin = lo, xmax = hi), size = 0.3, linewidth = 0.35,
+                    position = position_dodge(width = 0.55)) +
+    facet_wrap(~ Segment, ncol = min(3, K_star)) +
+    scale_color_viridis_d(begin = 0.15, end = 0.75) +
+    scale_shape_manual(values = c(Unweighted = 15, `Design-based` = 16, BCH = 5)) +
+    scale_x_continuous(limits = c(0, NA)) +
+    labs(x = "Share of the level in this segment", y = NULL,
+         color = NULL, shape = NULL, title = v) +
+    theme_lca()
+  print(p)
+  cat("\n\n{{< pagebreak >}}\n\n")
+})
+```
+
+## What the domain tables say {#sec-domain-read}
+
+The tables above carry one row per segment for every demographic, and most of the cells say nothing. Finding the two or three that do is the analyst's problem, and this section drafts that reading with a language model.
+
+The division of labour is the point. Before anything is sent, R works out which pairs of levels have intervals that do not overlap, and the model is handed that list and told to name only those. It never sees a standard error and never decides for itself whether a difference is real. Its rules forbid ranking levels whose intervals overlap, forbid causal language, require silence on any level flagged as too small to characterise, and cap the output at four findings, because the point is to say where to look rather than to narrate every cell.
+
+The prompt below is the real one, printed verbatim for the first demographic.
+
+```{r domain-prompt-example}
+#| echo: false
+#| eval: !expr K_ready
+cat("=========== SYSTEM PROMPT ===========\n")
+cat(wrap_text(persona_lca), "\n\n")
+cat("=========== USER PROMPT (", cfg$aux[1], ") ===========\n")
+cat(wrap_text(prompt_domain_read(domain_both, marginals, cfg$aux[1],
+                                 wald = wald_dsg,
+                                 labels = segment_labels$Label,
+                                 context = cfg$survey_context)), "\n")
+```
+
+```{r domain-read}
+#| eval: !expr K_ready
+domain_reads <- map(cfg$aux, function(v) {
+  obj <- parse_json_block(
+    lca_chat(cfg)$chat(prompt_domain_read(domain_both, marginals, v,
+                                          wald = wald_dsg,
+                                          labels = segment_labels$Label,
+                                          context = cfg$survey_context),
+                       echo = FALSE))
+  tibble(Variable = v,
+         Finding = pluck(obj, "finding", .default = NA_character_),
+         Caution = pluck(obj, "caution", .default = NA_character_))
+}) |>
+  list_rbind()
+
+lca_table(domain_reads, widths = c("7em", "22em", "16em"),
+          caption = "Drafted reading of each demographic. Verify against the tables above.")
+```
+
+# The delivered data product
+
+The workflow writes a labelled SPSS file carrying the segment assignment with value labels, the label text, the posterior probabilities, and the assignment diagnostics, alongside CSV exports of the measurement model with intervals and the domain estimates.
+
+The posterior columns are exported deliberately. A downstream analyst who cross-tabulates the modal assignment alone reintroduces exactly the attenuation described in @sec-domains, and the variable label on the segment column says so.
+
+```{r handoff}
+#| eval: !expr K_ready
+out_sav <- survey_scored |>
+  mutate(segment_label = if_else(is.na(segment), NA_character_,
+                                 segment_labels$Label[segment]),
+         segment = haven::labelled(
+           segment,
+           labels = set_names(segment_labels$K, segment_labels$Label),
+           label = paste("Segment (design-weighted LCA). Modal assignment:",
+                         "cross-tabs on this variable alone are attenuated by",
+                         "classification error. Use the post_segment columns for",
+                         "uncertainty-aware analysis.")))
+
+haven::write_sav(out_sav, file.path(cfg$lca_dir, "survey_with_segments.sav"))
+
+write_csv(mutate(ci_tbl, segment_label = segment_labels$Label[segment]),
+          file.path(cfg$lca_dir, "measurement_model_with_CIs.csv"))
+write_csv(transmute(domain_both, demographic = variable, level, segment,
+                    segment_label = segment_labels$Label[segment],
+                    estimator, prevalence = p, se, lo, hi),
+          file.path(cfg$lca_dir, "segment_demographics.csv"))
+write_csv(transmute(marginals, demographic = variable, level, n,
+                    weighted_share = weighted, se),
+          file.path(cfg$lca_dir, "demographic_marginals.csv"))
+write_csv(domain_reads, file.path(cfg$lca_dir, "domain_readings.csv"))
+
+saveRDS(list(fit_w = fit_w, fit_unit = fit_unit, pl_aligned = pl_aligned,
+             validation = validation, enum = enum, ci_tbl = ci_tbl,
+             bvr_tbl = bvr_tbl, item_discrim = item_discrim, ratio = ratio_tbl,
+             domain = domain,
+             marginals = marginals, items = cfg$items,
+             dat = dat, post_w = post_w, modal_int = modal_int,
+             w_vec = w_vec, K = K_star, nu = nu),
+        file.path(cfg$lca_dir, "model_fit.rds"))
+
+glue("Wrote survey_with_segments.sav ({nrow(scored)} scored), four CSVs, ",
+         "and model_fit.rds to {cfg$lca_dir}")
+```
+
+# Limitations
+
+The pseudo-likelihood can be multimodal with near-tied optima. The reported solution is the best mode found under many seeded starts, and the JKn variance expresses within-mode design variance only, not uncertainty about mode selection.
+
+The measurement model is fit on item-complete cases while scoring and domain estimation extend to partially observed respondents. Respondents scored from fewer items carry more classification error, which is the correlated-error case flagged in @sec-tse: a processing error whose magnitude depends on an item nonresponse error.
+
+Domain estimates are reported both uncorrected and BCH-corrected. The uncorrected version uses hard modal assignment and understates differences between demographic levels, so a difference that appears there is real while a null is not evidence of no association. The corrected version removes that attenuation but conditions on the fitted measurement model: step-one parameter uncertainty is not propagated in the reported intervals. This is standard three-step practice, and the sensitivity refit above shows what it costs. Rebuilding the measurement model inside every replicate multiplies the BCH standard errors for `age_cat` by a median of 2.17 and by as much as 4.22, which is consistent with a weighted relative entropy of 0.71 rather than the high-separation regime in which fixed step one is usually defended [@bakk2014]. The reported BCH intervals should therefore be read as optimistic by roughly a factor of two, and any separation that would not survive intervals of that width should not be quoted as a finding.
+
+Bivariate residuals and the indicator screen are rankings without reference distributions. They order item pairs and items by how poorly the model accounts for them and support no test.
+
+The replicate count equals the number of PSUs, so the replicate covariance matrix has rank at most that number. Individual variances and pairwise covariances remain consistent, which is all the reported quantities require, but a joint Wald test across more dimensions than there are replicates is not available.
+
+Where a design imposes quotas at the final selection stage, variables controlled by those quotas have suppressed between-cluster variance and standard errors that reflect fieldwork control rather than sampling information. Such variables' apparent precision should not be reported without comment.
+
+Language model labels are drafts with an audited override path. No claim is made about their validity, and no reliability estimate across runs is reported.
+
+# Replication {#sec-replication}
+
+`source_code.R` is the engine and is never edited per dataset. `survey_data_read.R` holds the file path, the design columns and the demographic recodes, and is shared with the factor report. `survey_lca_config.R` holds the item list and the settings for this arm. This document produces the analysis. A companion script audits object flow through the document in chunk order.
+
+Six things change in a port.
+
+**The file path and item list.** `item_codes` is a named character vector mapping analysis names to source variable names; the names become the analysis names automatically.
+
+**The nonresponse codes.** `na_codes` lists the values representing nonresponse. The source file must be read with `user_na = TRUE`, since the default converts declared user-missing values to `NA` on import and the codes then never arrive.
+
+**The design variables.** The configuration renames them to fixed names `id`, `strata`, `psu`, `wt`, so nothing downstream varies by dataset. Determining which source variables these are is the highest-consequence decision in a port: if the stratification variable is wrong, every standard error in this document is wrong and nothing else will reveal it.
+
+**The demographic recodes.** One `recode_values` per variable, every observed source label named explicitly, with `unmatched = "error"` and an `NA ~ NA` arm. A regular expression scheme is not acceptable: a pattern that matches a label it was not intended to match silently misclassifies respondents, and one that matches nothing silently deletes them.
+
+**The profiling variable list.** `cfg$aux` selects which demographics drive @sec-domains. Attitudinal variables should be excluded when they are plausibly correlated with the measurement items by construction, since profiling segments on them partly explains the measurement model with itself.
+
+**The configuration block.** `K_range`, `n_starts`, `seed`, the information floor `min_items`, the complete-case switch, the output directory, and the language model endpoint.
+
+The following halt the render rather than produce a wrong number: any demographic source label unmatched by its `recode_values` arms; any configured column absent from the data; any stratum containing a single PSU in the analysis frame, reported by stratum; a mismatch between the number of estimated domain quantities and their metadata; and a label file whose row count does not match $K$.
+
+The following must be checked by the analyst: the recode audit, once per dataset; the weight coefficient of variation and unequal weighting effect, which determine whether weighting is doing anything in this file; the enumeration table and profiles, to choose $K$; assignment quality by number of items answered, to set the information floor; and the drafted labels against their profile panels.
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
