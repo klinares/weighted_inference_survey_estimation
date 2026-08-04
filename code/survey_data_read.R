@@ -15,7 +15,7 @@
 #  indicators are set in the config script since they differ by method
 #_______________________________________________________
 demo_codes <- c(age_cat = "q2",
-                gender = "q1tc_r",
+                sex = "q1tc_r",
                 education = "edre",
                 urban = "ur",
                 employment = "ocup4a")
@@ -63,7 +63,7 @@ demo_dat <- raw_survey_dat |>
                   labels = c("16-29", "30-44", "45-59", "60+")) |>
       as.character(),
 
-    gender = as.character(haven::as_factor(gender)) |>
+    sex = as.character(haven::as_factor(sex)) |>
       recode_values("Hombre/masculino" ~ "Male",
                     "Mujer/femenino" ~ "Female",
                     "No se identifica como hombre ni como mujer" ~ NA_character_,
@@ -103,7 +103,7 @@ demo_dat <- raw_survey_dat |>
 # First level of each is the contrast reference in the reports.
 demo_levels <- list(
   age_cat = c("16-29", "30-44", "45-59", "60+"),
-  gender = c("Male", "Female"),
+  sex = c("Male", "Female"),
   education = c("Secondary", "Primary", "Tertiary"),
   urban = c("Urban", "Rural"),
   employment = c("Employed", "Unemployed", "Not in labor force", "Student",

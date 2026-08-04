@@ -21,9 +21,9 @@ item_codes <- c(respect_institutions = "b2",
                 legislature          = "b13",
                 police               = "b18",
                 political_parties    = "b21",
-                president            = "b21a",
+                #president            = "b21a",
                 supreme_court        = "b31",
-                municipality         = "b32",
+                #municipality         = "b32",
                 media                = "b37",
                 elections            = "b47a")
 
@@ -87,12 +87,21 @@ dictionary <- tibble(item = items, variable = unname(item_codes)) |>
 # output. cfa_free takes residual covariances the modification indices flag, or a
 # constraint such as "g ~~ 0*support" for a bifactor.
 #
-cfa_factors <- list(
-   support = c("respect_institutions", "rights_protected",
-               "system_pride", "system_support"),
-   trust   = c("armed_forces", "legislature", "police", "political_parties",
-               "president", "supreme_court", "municipality", "media",
-               "elections"))
+# cfa_factors <- list(
+#    support = c("respect_institutions", "rights_protected",
+#                "system_pride", "system_support"),
+#    trust   = c("armed_forces", "legislature", "police", "political_parties",
+#                "president", "supreme_court", "municipality", "media",
+#                "elections"))
+
+# Identifiers, not interpretations. The construct names come from the frozen
+# factor_labels.csv, so nothing in the config anchors the naming step.
+cfa_factors = list(
+  f1 = c("respect_institutions", "rights_protected",
+         "system_pride", "system_support"),
+  f2 = c("armed_forces", "legislature", "police",
+         "political_parties", "supreme_court", "media", "elections")
+)
 
 #cfa_factors <- NULL
 

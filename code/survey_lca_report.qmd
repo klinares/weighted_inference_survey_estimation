@@ -18,7 +18,7 @@ bibliography: bibliography.bib
 execute:
   warning: false
   message: false
-  cache: true
+  cache: false
 ---
 
 ```{r setup}
@@ -70,7 +70,7 @@ Two caveats about the framework itself are worth carrying forward. TSE centers o
 
 Both models take the same battery of answers and look for something underneath that the individual questions only measure imperfectly. They differ in what they assume that something is. A latent class model assumes it is a small number of distinct kinds of respondent, and asks which kind each person most resembles. A factor model assumes it is a single continuum running from low to high, and asks where on it each person sits. Neither assumption is more correct in general; the battery decides.
 
-The practical question is whether people differ in *how much* or in *which*. If respondents mostly line up from those who answer low on everything to those who answer high on everything, a continuum describes them and the classes are just cut points on it. If instead a substantial group trusts some institutions while distrusting others, and a different group reverses that pattern, then no single number can represent both and the class model is recovering something real. This report includes a diagnostic that measures the balance between the two: how much segments differ in overall level, against how much they differ in which items they favour.
+The practical question is whether people differ in *how much* or in *which*. If respondents mostly line up from those who answer low on everything to those who answer high on everything, a continuum describes them and the classes are just cut points on it. If instead a substantial group trusts some institutions while distrusting others, and a different group reverses that pattern, then no single number can represent both and the class model is recovering something real.
 
 The class model has a communication advantage that is worth weighing. Its output is a share of a group, and shares are what most readers already know how to interpret: saying that thirty-one per cent of rural respondents fall in the distrustful segment needs no explanation. A factor model produces a position on a scale with no natural units, which has to be translated before anyone outside the analysis can use it. That is a reason to prefer classes when the substantive difference between the two models is small, and it is not a reason to prefer them when it is large.
 
@@ -350,9 +350,8 @@ The inner expression is total variation distance between two discrete distributi
 
 The second question is how far the expected response actually travels, reported alongside as `range` and scaled by the number of categories so a two-point and a four-point item are comparable. This assumes the categories are ordered, which the model does not, but it is what an analyst reads off a profile plot. The two usually agree. Where they do not, the item is doing something worth looking at.
 
-Reported with them is the balance between level and pattern across the whole battery: how much the segments differ in how high they answer overall, against how much they differ in which items they favour. Each item is rescaled to run from zero to one first, so a four-category item does not contribute more possible spread than a binary one. A ratio well below one says the segments are cut points on a single continuum, which a factor model would describe with far fewer parameters. Near or above one says they reorder the items, which is structure no single factor can hold, and it is the case this model is for.
-
 ```{r item-discrimination}
+#| echo: false
 #| eval: !expr K_ready
 item_discrim <- item_discrimination(fit_w, cfg$items)
 
@@ -362,10 +361,6 @@ item_discrim |>
             widths = c("14em", "9em", "6em"),
             caption = "Two views of how much each item separates the segments.")
 
-ratio_tbl <- level_pattern_ratio(fit_w, cfg$items)
-glue("Level and pattern: between-segment SD of overall level ",
-         "{round(ratio_tbl$sd_level, 3)}, SD of item-specific deviation from that ",
-         "level {round(ratio_tbl$sd_pattern, 3)}, ratio {round(ratio_tbl$ratio, 2)}.")
 ```
 
 Local independence is probed pairwise. For items $a$ and $b$, let $\widehat P_{ab}(c,d)$ be the design-weighted observed proportion giving response $c$ to item $a$ and $d$ to item $b$, and let
@@ -628,7 +623,10 @@ scored |>
             .groups = "drop") |>
   lca_table(align = "rrr", widths = c("10em", "6em", "12em"),
             col.names = c("Items answered", "n", "Mean max posterior"),
-            caption = "Assignment quality by number of items answered. Respondents scored from fewer items carry flatter posteriors and so more classification error. If the mean falls sharply at the low end, raise cfg$min_items.")
+            caption = "Assignment quality by number of items 
+            answered. Respondents scored from fewer items carry 
+            flatter posteriors and so more classification error. 
+            If the mean falls sharply at the low end, raise cfg$min_items.")
 ```
 
 # Domain estimation {#sec-domains}
@@ -857,7 +855,9 @@ s1_tbl |>
             `SE propagated` = sprintf("%.4f", se_step1),
             Ratio = sprintf("%.2f", ratio)) |>
   lca_table(align = "llrrr", widths = fit_widths(5, first = 2.4), font_size = 8,
-            caption = "BCH standard errors with the step-one measurement model fixed against refit within every replicate, for one demographic.")
+            caption = "BCH standard errors with the step-one measurement 
+            model fixed against refit within every replicate, for 
+            one demographic.")
 ```
 
 ```{r domain-pages}
@@ -877,7 +877,8 @@ walk(cfg$aux, function(v) {
               label = paste0("comp-", tag),
               caption = paste0("Composition by ", v,
                                ": design-weighted proportion among respondents ",
-                               "who answered the item, with its JKn standard error.")) |>
+                               "who answered the item, with its JKn 
+                               standard error.")) |>
     cat(sep = "\n")
   cat("\n\n")
 
@@ -971,7 +972,8 @@ domain_reads <- map(cfg$aux, function(v) {
   list_rbind()
 
 lca_table(domain_reads, widths = c("7em", "22em", "16em"),
-          caption = "Drafted reading of each demographic. Verify against the tables above.")
+          caption = "Drafted reading of each demographic. Verify 
+          against the tables above.")
 ```
 
 # The delivered data product
@@ -990,7 +992,8 @@ out_sav <- survey_scored |>
            labels = set_names(segment_labels$K, segment_labels$Label),
            label = paste("Segment (design-weighted LCA). Modal assignment:",
                          "cross-tabs on this variable alone are attenuated by",
-                         "classification error. Use the post_segment columns for",
+                         "classification error. Use the post_segment 
+                         columns for",
                          "uncertainty-aware analysis.")))
 
 haven::write_sav(out_sav, file.path(cfg$lca_dir, "survey_with_segments.sav"))
@@ -1008,7 +1011,7 @@ write_csv(domain_reads, file.path(cfg$lca_dir, "domain_readings.csv"))
 
 saveRDS(list(fit_w = fit_w, fit_unit = fit_unit, pl_aligned = pl_aligned,
              validation = validation, enum = enum, ci_tbl = ci_tbl,
-             bvr_tbl = bvr_tbl, item_discrim = item_discrim, ratio = ratio_tbl,
+             bvr_tbl = bvr_tbl, item_discrim = item_discrim, 
              domain = domain,
              marginals = marginals, items = cfg$items,
              dat = dat, post_w = post_w, modal_int = modal_int,

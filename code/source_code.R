@@ -467,6 +467,11 @@ rules_domain <- paste(
   "   the numbers given. Do not treat a narrower interval as better or a wider",
   "   one as worse; the design-based figure is the honest one either way.",
   "7. Return only valid JSON: no prose before or after, no markdown fences.",
+  "8. Each estimate is followed by a 95 percent confidence interval, which",
+  "   expresses sampling uncertainty. Where the analysis did not resolve a",
+  "   pair, say the data do not separate them; do not say they are equal or",
+  "   similar, since an unresolved pair may differ by more than this sample",
+  "   can detect.",
   sep = "\n")
 
 # dictionary supplies the question wording and the response labels, in the 
@@ -678,12 +683,7 @@ check_factors <- function(factors, items) {
   invisible(TRUE)
 }
 
-fit_efa <- function(k, w, items, data) {
-  d = mutate(data, .w = w)
-  try(efa(data = select(d, all_of(items), .w), nfactors = k, ordered = items,
-          estimator = "WLSMV", sampling.weights = ".w", rotation = "geomin"),
-      silent = TRUE)
-}
+
 
 # Weighted polychoric correlations, falling back to weighted Pearson if 
 #  lavCor turns down the arguments. Feeds the eigenvalue search.
@@ -715,26 +715,15 @@ efa_loadings <- function(f, salient = 0.40) {
                             TRUE ~ NA_character_))
 }
 
-# Collapses a fit to the salient-loading pattern, one string per item. 
-# Comparing these across replicates is how we tell a real structure from one 
-#   resting on a few sampling units. 
-# Rotation orders the factors arbitrarily on every cold start, so the columns 
-#   are sorted by their own item pattern first; without
-#    that, a replicate recovering the same structure with the factors swapped
-#    would count against stability. 
-# Sign is already handled by abs(). 
-# Returns NULLon a solution with a negative residual variance as well as on 
-# one that failed outright: an impossible solution should not be allowed to vote.
-efa_pattern <- function(f, salient = 0.40) {
-  fit = as_fit(f)
-  if(inherits(fit, "try-error")) return(NULL)
-  if(!lavInspect(fit, "post.check")) return(NULL)
-  L = unclass(lavInspect(fit, "std")$lambda)
-  S = abs(L) >= salient
-  key = apply(S, 2, function(cl) paste(as.integer(cl), collapse = ""))
-  S = S[, order(key), drop = FALSE]
-  apply(S, 1, function(r) paste(as.integer(r), collapse = ""))
+# The search fit. Same estimator and weighting as fit_cfa, so the exploratory
+#   pass and the confirmatory model are on the same footing.
+fit_efa <- function(k, w, items, data) {
+  d = mutate(data, .w = w)
+  try(efa(data = select(d, all_of(items), .w), nfactors = k, ordered = items,
+          estimator = "WLSMV", sampling.weights = ".w", rotation = "geomin"),
+      silent = TRUE)
 }
+
 
 
 # Section 7 turns the domain table into a short read for the analyst. 
@@ -758,15 +747,11 @@ pick_estimator <- function(dom, est) {
 }
 
 # Lays one demographic out segment by segment, because that is the way the
-#   result gets read and written up: what is this segment made of, not what is
-#   this level made of. Levels under min_n are marked rather than dropped so the
-#   model can see they exist and still be told to leave them alone. 
-# values_header names what the numbers are, because the class arm reports 
-#   shares and the factor arm reports mean positions, and telling the model 
-#   one is the other invites a misreading. 
-#   est names the estimator whose rows are shown; the design-based rows are 
-#   the default in both arms, which is conservative, since their attenuation 
-#   means a difference that clears there is real.
+#   result gets read and written up. Levels under min_n are marked rather than
+#   dropped so the model can see they exist and still be told to leave them
+#   alone. values_header names what the numbers are, because the class arm
+#   reports shares and the factor arm reports mean positions. est names the
+#   estimator whose rows are shown, rather than taking one by position.
 format_domain_block <- function(
     dom, marg, variable, labels = NULL, min_n = 30,
     values_header = "Share of each level falling in each segment:",
@@ -780,7 +765,8 @@ format_domain_block <- function(
     cells = map_chr(seq_len(nrow(dd)), function(i) {
       n_lv = m$n[m$level == dd$level[i]]
       flag = if(length(n_lv) && n_lv < min_n) " [too small]" else ""
-      sprintf("%s %.2f [%.2f, %.2f]%s", dd$level[i], dd$p[i], dd$lo[i], dd$hi[i], flag)
+      sprintf("%s %.2f [%.2f, %.2f]%s", dd$level[i], dd$p[i], dd$lo[i],
+              dd$hi[i], flag)
     })
     str_glue("  {nm}\n      {paste(cells, collapse = ', ')}")
   })

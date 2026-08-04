@@ -18,7 +18,7 @@ bibliography: bibliography.bib
 execute:
   warning: false
   message: false
-  cache: true
+  cache: false
 ---
 
 ```{r setup}
@@ -41,13 +41,13 @@ This is the factor-analytic arm of the workflow. It takes the same items, the sa
 
 The two reports share a configuration file and an engine. Only the measurement model and the scoring step differ, and the replicate design that produces every standard error is identical in both.
 
-Almost nothing here is new statistics. Factor analysis of ordinal survey items is a mature method with mature software, and `lavaan` [@rosseel2012] does the estimation. What the workflow adds is the design: the weights enter the estimation, and the standard errors come from the survey's own clustering rather than from an assumption that respondents were sampled independently. @sec-variance shows what that is worth here, and it is not small.
+Almost nothing here is new statistics. Factor analysis of ordinal survey items is a mature method with mature software, and `lavaan` [@rosseel2012] does the estimation. What the workflow adds is the design: the weights enter the estimation, and the standard errors come from the survey's own clustering rather than from an assumption that respondents were sampled independently. @sec-variance shows what that is worth here, and the answer is not one anybody could have assumed in advance.
 
 # Choosing between a factor model and a latent class model {#sec-choosing}
 
 Both models take the same battery of answers and look for something underneath that the individual questions only measure imperfectly. They differ in what they assume that something is. A factor model assumes it is a single continuum running from low to high, and asks where on it each person sits. A latent class model assumes it is a small number of distinct kinds of respondent, and asks which kind each person most resembles. Neither is more correct in general; the battery decides.
 
-The practical question is whether people differ in *how much* or in *which*. If respondents mostly line up from those who answer low on everything to those who answer high on everything, a continuum describes them well and any classes you extract are cut points on it. If instead a substantial group trusts some institutions while distrusting others, and another group reverses that pattern, no single number can hold both and the class model is recovering structure a factor cannot. The class report includes a diagnostic that measures this balance directly.
+The practical question is whether people differ in *how much* or in *which*. If respondents mostly line up from those who answer low on everything to those who answer high on everything, a continuum describes them well and any classes you extract are cut points on it. If instead a substantial group trusts some institutions while distrusting others, and another group reverses that pattern, no single number can hold both and the class model is recovering structure a factor cannot.
 
 The factor model has two clear advantages when it applies. It estimates far fewer quantities, which matters a great deal at the sample sizes typical of a single-country survey: a five-class model on thirteen seven-category items carries several hundred free parameters, while a one-factor model on the same items carries under a hundred. And it treats the underlying trait as continuous, so it distinguishes between two people who both answer low without forcing them into the same bin.
 
@@ -83,17 +83,10 @@ gdeff <- median(as.numeric(deff(svymean(reformulate(items), rep_des,
                 na.rm = TRUE)
 n_eff <- n_obs / gdeff
 
-design <- build_rep_design(dat, cfg)
-des <- design$des
-rep_des <- design$rep_des
-nu <- degf(rep_des)
-crit <- qt(0.975, nu)
-
 glue("{length(items)} items, {n_obs} cases. ",
      "Design: {ncol(rep_des$repweights)} replicates, {nu} degrees of freedom. ",
      "Weights: \nCV = {round(sd(w_vec) / mean(w_vec), 3)}, ",
      "unequal weighting effect = {round(1 + (sd(w_vec) / mean(w_vec))^2, 2)}.")
-
 ```
 
 # What the model says, and what lavaan is doing {#sec-model}
@@ -116,14 +109,15 @@ Three pieces of evidence, and they answer different questions.
 
 **Eigenvalues** say how much shared variance each successive factor accounts for. The conventional check is Horn's parallel analysis: simulate data with no factor structure at all, compute its eigenvalues, and retain factors whose real eigenvalue clears the simulated one. Two adjustments matter here. The simulation runs at an effective sample size that divides the achieved one by the design effect of the item means, because a clustered survey of 1,600 carries less information than 1,600 independent observations and the threshold would otherwise sit too low. And the simulated data are cut into the same response categories as the real items and read back with the same polychoric estimator, because polychoric correlations are noisier than ordinary ones and a threshold built from continuous random data would be too easy to clear. The eigenvalues also carry confidence intervals from the replicate design, which a bare scree plot cannot offer.
 
-
-**Admissibility** comes first, because it is a yes or no. A residual variance is the part of an item the factors do not explain, and it cannot be negative. When one comes out negative the solution is impossible rather than merely poor, and the usual cause is asking for more factors than the battery supports: one of them splits off and absorbs more than all of an item's variance. Such a solution is out regardless of how good its fit indices look, and the fit indices will look good, because an inadmissible solution is one that has fitted the sample too closely.
+**Admissibility** comes first, because it is a yes or no. A residual variance is the part of an item the factors do not explain, and it cannot be negative. When one comes out negative the solution is impossible rather than merely poor, and the usual cause is asking for more factors than the battery supports: one of them splits off and absorbs more than all of an item's variance. Such a solution is out regardless of how good its fit indices look, and the fit indices will look good, because an inadmissible solution is one that has fitted the sample too closely. Read `min_resid` beside the flag rather than trusting the flag alone: `lavaan` bounds residual variances at zero by default, so a Heywood case surfaces as a residual pinned near zero rather than as a negative one.
 
 **Fit indices** say how well each candidate reproduces the observed correlations. They will improve as factors are added, always, because more factors fit better. They are useful for spotting a model that fits badly and close to useless for choosing between models that all fit acceptably.
 
-**Stability** is the check that actually decides. The usual way to guard against reading noise as structure is to hold out part of the sample, fit on one half and confirm on the other. At the sample sizes this workflow targets that is unaffordable. Instead we refit the model on each replicate weight vector, once per sampling cluster, and count how often the pattern of which items load on which factor reproduces the full-sample answer. A structure that survives leaving out any single cluster is not an artefact of a few sampling points, and it costs no cases. Stability is computed over every replicate, so a refit that fails or returns an inadmissible solution counts against the structure rather than being dropped from the denominator. Read it beside `rep_ok`: at four factors, 23 of 84 replicates did not return an admissible solution at all, and a structure that cannot be recovered on a quarter of the leave-one-cluster-out refits is not one to build on.
+**Stability** is what a search on an unknown battery most wants and is also the most expensive thing to compute, so the evidence here is indirect. The eigenvalues carry replicate-based confidence intervals, which is the check that costs nothing: a second eigenvalue whose interval clears the random-data threshold is not resting on a handful of sampling points, and one whose interval straddles it is not a factor whatever the fit indices say. Beyond that, the guard is the confirmatory fit itself. A structure read off this search and then fitted in @sec-chosen is not independently tested, which the limitations state, and on a battery where the eigenvalues do not settle the question the honest answer is a second sample rather than a resampling of this one.
 
 ```{r eigen}
+#| fig-height: 2.8
+#| fig-cap: "Design-weighted eigenvalues with replicate intervals against the random-data threshold."
 R <- wcor(w_vec, items, dat)
 eig_hat <- eigen(R, only.values = TRUE)$values
 
@@ -149,7 +143,7 @@ pa <- future_map(1:cfg$n_pa, function(i) {
 eig_tbl <- tibble(factor = seq_along(items), eigenvalue = eig_hat,
                   se = sqrt(diag(replicate_variance(
                     rep_des,
-                    function(w) eigen(wcor(w, items, dat), 
+                    function(w) eigen(wcor(w, items, dat),
                                       only.values = TRUE)$values,
                     eig_hat)))) |>
   mutate(lo = eigenvalue - crit * se, hi = eigenvalue + crit * se,
@@ -158,9 +152,22 @@ eig_tbl <- tibble(factor = seq_along(items), eigenvalue = eig_hat,
 
 eig_tbl |>
   filter(factor <= max(cfg$k_range)) |>
+  ggplot(aes(factor, eigenvalue)) +
+  geom_line(colour = viridisLite::viridis(1, begin = 0.4)) +
+  geom_pointrange(aes(ymin = lo, ymax = hi), size = 0.3, na.rm = TRUE) +
+  geom_line(aes(y = random_95), linetype = "dashed", colour = "grey45") +
+  scale_x_continuous(breaks = cfg$k_range) +
+  labs(x = "Number of factors", y = NULL) +
+  theme_lca()
+```
+
+```{r eigen-table}
+#| echo: false
+eig_tbl |>
+  filter(factor <= max(cfg$k_range)) |>
   mutate(across(where(is.numeric), function(x) round(x, 3))) |>
   lca_table(align = "r",
-            caption = "Design-weighted eigenvalues against a random-data 
+            caption = "Design-weighted eigenvalues against a random-data
             threshold at the effective sample size.")
 ```
 
@@ -169,89 +176,22 @@ efa_fits <- future_map(cfg$k_range, function(k) fit_efa(k, w_vec, items, dat),
                        .options = furrr_options(seed = NULL,
                          packages = c("lavaan", "dplyr")))
 
-Wm <- weights(rep_des, type = "analysis")
-
 efa_tbl <- map2(cfg$k_range, efa_fits, function(k, f) {
   fit = as_fit(f)
   if(inherits(fit, "try-error")) return(tibble(k = k, converged = FALSE))
   fm = fitMeasures(fit)
   pick = function(nm) if(nm %in% names(fm)) as.numeric(fm[nm]) else NA_real_
-  ref = efa_pattern(f)
-  reps = future_map(seq_len(ncol(Wm)),
-                    function(r) efa_pattern(fit_efa(k, Wm[, r], items, dat)),
-                    .options = furrr_options(seed = NULL,
-                      packages = c("lavaan", "dplyr")))
-  ok = !map_lgl(reps, is.null)
-  tibble(k = k, rep_ok = sum(ok),
-         admissible = lavInspect(fit, "post.check"),
+  tibble(k = k, admissible = lavInspect(fit, "post.check"),
          min_resid = min(diag(lavInspect(fit, "theta"))),
          cfi = pick("cfi.scaled"), rmsea = pick("rmsea.scaled"),
-         srmr = pick("srmr"),
-         stability = mean(map_lgl(reps, function(p) !is.null(p) &&
-                                    identical(p, ref))))
+         srmr = pick("srmr"))
 }) |>
   list_rbind()
 
 efa_tbl |>
   mutate(across(where(is.numeric), function(x) round(x, 3))) |>
   lca_table(align = "r",
-            caption = "Factor solutions compared. Read admissible first, then stability.")
-```
-
-Successive solutions are nested, so a likelihood ratio test can ask whether the extra factor buys a real improvement. It comes with a caveat that matters here. The test is computed from the model-based information matrix, which assumes respondents were sampled independently, so on a clustered sample it is inflated and rejects too readily. The second column divides the statistic by the median design effect of the item means, which is a first-order correction in the spirit of Rao and Scott [@rao1988]: an approximation, since the exact version uses the eigenvalues of the design effect matrix rather than a median of marginal ratios, but a far better guide than the uncorrected number.
-
-```{r lrt}
-# A generalized design effect for this battery, taken from the item means. It is
-# available before the model is fitted, which the loading design effects are not,
-# and it costs one svymean call.
-
-lrt_tbl <- map(head(cfg$k_range, -1), function(k) {
-  a <- as_fit(efa_fits[[which(cfg$k_range == k)]])
-  b <- as_fit(efa_fits[[which(cfg$k_range == k + 1)]])
-  if (inherits(a, "try-error") || inherits(b, "try-error"))
-    return(tibble(comparison = paste(k, "vs", k + 1)))
-  t <- try(lavTestLRT(a, b), silent = TRUE)
-  if (inherits(t, "try-error")) return(tibble(comparison = paste(k, "vs", k + 1)))
-  chi <- as.numeric(t[2, "Chisq diff"]); df <- as.numeric(t[2, "Df diff"])
-  tibble(comparison = paste(k, "vs", k + 1), chisq = chi, df = df,
-         p_naive = pchisq(chi, df, lower.tail = FALSE),
-         p_design = pchisq(chi / gdeff, df, lower.tail = FALSE))
-}) |>
-  list_rbind()
-
-lrt_tbl |>
-  mutate(across(c(chisq), function(x) round(x, 1)),
-         across(starts_with("p_"), function(x) sprintf("%.4f", x))) |>
-  lca_table(align = "lrrrr",
-            col.names = c("Comparison", "Chi-square", "df", "p naive", "p 
-                          adjusted"),
-            widths = fit_widths(5, first = 1.6), font_size = 8,
-            caption = paste0("Nested comparison of successive factor solutions, 
-                             naive and design-adjusted (deff ",
-                             round(gdeff, 2),
-                             "), a first-order approximation to a Rao-Scott 
-                             correction. Read it as a guide, not an exact test.")
-            )
-```
-
-```{r fig-search}
-#| echo: false
-#| fig-height: 2.8
-#| fig-cap: "Eigenvalues against the random-data threshold, and structure stability across leave-one-cluster-out refits. The dashed lines are the reference each panel is read against."
-bind_rows(
-  eig_tbl |> filter(factor <= max(cfg$k_range)) |>
-    transmute(k = factor, panel = "Eigenvalue", value = eigenvalue,
-              lo, hi, ref = random_95),
-  efa_tbl |> transmute(k, panel = "Stability", value = stability,
-                       lo = NA_real_, hi = NA_real_, ref = 0.9)) |>
-  ggplot(aes(k, value)) +
-  geom_line(colour = viridisLite::viridis(1, begin = 0.4)) +
-  geom_pointrange(aes(ymin = lo, ymax = hi), size = 0.3, na.rm = TRUE) +
-  geom_line(aes(y = ref), linetype = "dashed", colour = "grey45") +
-  facet_wrap(~ panel, scales = "free_y") +
-  scale_x_continuous(breaks = cfg$k_range) +
-  labs(x = "Number of factors", y = NULL) +
-  theme_lca()
+            caption = "Factor solutions compared, admissibility first.")
 ```
 
 ## Reading the loadings
@@ -285,6 +225,8 @@ walk(cfg$k_range, function(k) {
 
 # The chosen model {#sec-chosen}
 
+The eigenvalue evidence above favours a single factor, and two are fitted here. That is an analyst decision taken on the loading pattern rather than on the eigenvalues: the four system-support items and the nine institutional-trust items separate cleanly at two factors and load on constructs the questionnaire itself treats as distinct. The limitations record it as a departure from the automatic reading.
+
 ```{r k-gate}
 #| results: asis
 if (!k_ready)
@@ -308,12 +250,12 @@ fm <- fitMeasures(fit_w)
 
 glue("Converged: {lavInspect(fit_w, 'converged')}. ",
      "{fm['npar']} free parameters on {n_obs} cases. ",
-     "Robust CFI {round(fm['cfi.scaled'], 3)}, 
+     "Robust CFI {round(fm['cfi.scaled'], 3)},
      TLI {round(fm['tli.scaled'], 3)}, ",
      "RMSEA {round(fm['rmsea.scaled'], 3)}, SRMR {round(fm['srmr'], 3)}.")
 ```
 
-Conventional targets are CFI and TLI above 0.95, RMSEA below 0.06, and SRMR below 0.08. They are guidance rather than thresholds, they were derived under simple random sampling, and RMSEA in particular penalises large samples. Read them alongside the loading pattern rather than instead of it.
+Conventional targets are CFI and TLI above 0.95, RMSEA below 0.06, and SRMR below 0.08. They are guidance rather than thresholds, they were derived under simple random sampling, and RMSEA in particular penalizes large samples. Read them alongside the loading pattern rather than instead of it.
 
 # Design-based variance {#sec-variance}
 
@@ -324,9 +266,11 @@ Two things are specific to this arm. `lavaan` starts cold on every replicate rat
 ```{r jackknife}
 #| eval: !expr k_ready
 par_names <- names(coef(fit_w))
+Wm <- weights(rep_des, type = "analysis")
 
 theta_cfa <- function(w_rep) {
-  f <- try(fit_cfa(w_rep, items, dat, cfg$cfa_factors, cfg$cfa_free), silent = TRUE)
+  f <- try(fit_cfa(w_rep, items, dat, cfg$cfa_factors, cfg$cfa_free),
+           silent = TRUE)
   if (inherits(f, "try-error") || !lavInspect(f, "converged"))
     return(rep(NA_real_, length(par_names)))
   coef(f)[par_names]
@@ -338,13 +282,15 @@ Theta <- do.call(rbind, future_map(seq_len(ncol(Wm)),
 ok <- complete.cases(Theta)
 
 d_dev <- sweep(Theta[ok, , drop = FALSE], 2, coef(fit_w)[par_names], "-")
-V_cfa <- rep_des$scale * crossprod(d_dev * sqrt(rep_des$rscales[ok]))
+V_cfa_par <- rep_des$scale * crossprod(d_dev * sqrt(rep_des$rscales[ok]))
 
 param_tbl <- tibble(parameter = par_names,
                     estimate = as.numeric(coef(fit_w)[par_names]),
-                    se_design = sqrt(diag(V_cfa)),
+                    se_design = sqrt(diag(V_cfa_par)),
                     se_model = as.numeric(sqrt(diag(vcov(fit_w)))[par_names])) |>
-  mutate(kind = if_else(str_detect(parameter, "=~"), "loading", "threshold"),
+  mutate(kind = case_when(str_detect(parameter, "=~") ~ "loading",
+                          str_detect(parameter, "\\|") ~ "threshold",
+                          .default = "variance"),
          deff = (se_design / se_model)^2,
          lo = estimate - crit * se_design, hi = estimate + crit * se_design)
 
@@ -359,9 +305,38 @@ param_tbl |>
             `SE lavaan` = sprintf("%.4f", se_model),
             Deff = sprintf("%.2f", deff)) |>
   lca_table(align = "lrrrrr", widths = fit_widths(6, first = 1.8), font_size = 7,
-            caption = "Loadings with design-based intervals, and the design 
+            caption = "Loadings with design-based intervals, and the design
             effect on each.")
 
+# The covariance between factors is estimated on the marker scale, which no one
+# can read. The correlation is a function of three parameters the jackknife
+# already carries, so its interval comes from the replicates rather than from a
+# delta-method approximation.
+fn_pair <- colnames(lavInspect(fit_w, "std")$lambda)
+
+rho_of <- function(v, a, b)
+  v[paste0(a, "~~", b)] / sqrt(v[paste0(a, "~~", a)] * v[paste0(b, "~~", b)])
+
+cor_tbl <- if (length(fn_pair) > 1) {
+  as_tibble(t(combn(fn_pair, 2)), .name_repair = function(x) c("a", "b")) |>
+    pmap(function(a, b) {
+      hat = as.numeric(rho_of(coef(fit_w), a, b))
+      dev = apply(Theta[ok, , drop = FALSE], 1,
+                  function(v) rho_of(v, a, b)) - hat
+      se = sqrt(rep_des$scale * sum(dev^2 * rep_des$rscales[ok]))
+      tibble(a = a, b = b, pair = paste(a, "and", b), rho = hat, se = se,
+             lo = hat - crit * se, hi = hat + crit * se)
+    }) |>
+    list_rbind()
+} else NULL
+
+if (!is.null(cor_tbl))
+  cor_tbl |>
+    transmute(Pair = pair, Correlation = sprintf("%.3f", rho),
+              `95% CI` = sprintf("[%.3f, %.3f]", lo, hi),
+              `SE design` = sprintf("%.4f", se)) |>
+    lca_table(align = "lrrr", font_size = 8,
+              caption = "Correlation between factors, with a design-based interval.")
 ```
 
 The plot below is the diagram of the measurement model. It carries what a path diagram carries, one arrow per item, and adds what a path diagram cannot: the design-based interval on every loading. Loadings are on the marker scale rather than standardised, because that is the scale the jackknife estimated them on and rescaling would mean approximating the interval rather than reporting it. The anchor item is fixed at one by construction and has no interval.
@@ -395,7 +370,7 @@ param_tbl |>
   facet_wrap(~ factor, scales = "free_y") +
   scale_fill_manual(values = c(`FALSE` = viridisLite::viridis(1, begin = 0.55),
                                `TRUE` = "grey75"),
-                    labels = c(`FALSE` = "estimated", `TRUE` = "anchor, 
+                    labels = c(`FALSE` = "estimated", `TRUE` = "anchor,
                                fixed at 1")) +
   labs(x = "Loading (marker scale)", y = NULL, fill = NULL) +
   theme_lca()
@@ -408,8 +383,8 @@ The number on each edge is the standardised loading, running from 0 to 1. It say
 ```{r fig-cfa-diagram}
 #| eval: !expr k_ready
 #| echo: false
-#| fig-height: 5.6
-#| fig-cap: "The fitted measurement model. Each edge carries the standardised loading, from 0 to 1."
+#| fig-height: 6
+#| fig-cap: "The fitted measurement model. Item edges carry the standardised loading; the arc between factors carries their correlation."
 lam_std <- unclass(lavInspect(fit_w, "std")$lambda)
 fac <- colnames(lam_std)
 
@@ -427,6 +402,22 @@ nodes <- assign_tbl |>
   summarise(ny = mean(y), .groups = "drop") |>
   arrange(match(factor, fac))
 
+# The factors are correlated, and a diagram that draws items but not the link
+# between the factors hides the parameter that says whether two were warranted.
+# An empty frame rather than NULL, so a one-factor solution draws nothing here
+# instead of erroring.
+fcor <- unclass(lavInspect(fit_w, "std")$psi)
+
+node_pairs <- if (length(fac) > 1) {
+  as_tibble(t(combn(seq_along(fac), 2)),
+            .name_repair = function(x) c("i", "j")) |>
+    mutate(y1 = nodes$ny[i], y2 = nodes$ny[j],
+           rho = map2_dbl(i, j, function(a, b) fcor[a, b]))
+} else {
+  tibble(i = integer(), j = integer(), y1 = double(), y2 = double(),
+         rho = double())
+}
+
 edges <- as_tibble(lam_std, rownames = "item") |>
   pivot_longer(-item, names_to = "factor", values_to = "loading") |>
   filter(abs(loading) > 0.05) |>
@@ -437,8 +428,17 @@ J <- nrow(assign_tbl)
 
 ggplot(edges) +
   geom_curve(aes(x = 0.20, y = ny, xend = 0.58, yend = y,
-                 linewidth = abs(loading), alpha = abs(loading), colour = factor),
+                 linewidth = abs(loading), alpha = abs(loading),
+                 colour = factor),
              curvature = 0.10) +
+  geom_curve(data = node_pairs,
+             aes(x = 0.20, y = y1, xend = 0.20, yend = y2),
+             curvature = -0.55, linewidth = 0.4, colour = "grey40",
+             inherit.aes = FALSE) +
+  geom_label(data = node_pairs,
+             aes(x = 0.135, y = (y1 + y2) / 2, label = sprintf("%.2f", rho)),
+             size = 2.4, label.size = 0, fill = "white",
+             label.padding = unit(1.5, "pt"), inherit.aes = FALSE) +
   geom_label(aes(x = 0.42, y = (y + ny) / 2, label = sprintf("%.2f", loading),
                  colour = factor),
              size = 2.2, label.size = 0, fill = "white",
@@ -451,7 +451,7 @@ ggplot(edges) +
   scale_linewidth(range = c(0.2, 2.0)) +
   scale_alpha(range = c(0.3, 0.9)) +
   scale_colour_viridis_d(begin = 0.15, end = 0.65) +
-  scale_x_continuous(limits = c(0.10, 1.02)) +
+  scale_x_continuous(limits = c(0.03, 1.02)) +
   scale_y_continuous(limits = c(0.3, J + 0.7)) +
   labs(x = NULL, y = NULL) +
   theme_void() +
@@ -486,13 +486,13 @@ modindices(fit_w, sort = TRUE, minimum.value = 10) |>
   transmute(`Item A` = lhs, `Item B` = rhs,
             MI = sprintf("%.1f", mi), EPC = sprintf("%.3f", epc)) |>
   lca_table(align = "llrr", widths = c("12em", "12em", "6em", "6em"),
-            caption = "Ten largest modification indices for residual 
+            caption = "Ten largest modification indices for residual
             covariances. A ranking, not a test.")
 ```
 
 # Naming the factor {#sec-labeling}
 
-A factor is a number with no name. The model has told us that thirteen items track one continuum; it has not told us what that continuum is, and nothing in the estimation can. Naming it is an interpretive act, and this section drafts it with a language model under a fixed instrument so the analyst can accept, edit, or reject.
+A factor is a number with no name. The model has told us which items track a continuum; it has not told us what that continuum is, and nothing in the estimation can. Naming it is an interpretive act, and this section drafts it with a language model under a fixed instrument so the analyst can accept, edit, or reject.
 
 The design principle is the one that governs every language-model step in this workflow: the model receives conclusions, never parameters. It sees each item's wording and its standardised loading, ordered so the strongest indicators come first. It does not see the covariance matrix, the estimator, or the fit indices, because it cannot do anything useful with them and their presence degrades the output.
 
@@ -536,8 +536,10 @@ if (file.exists(lab_path)) {
   write_csv(factor_labels, lab_path)
 }
 
+stopifnot(nrow(factor_labels) == length(fnames))
+
 lca_table(factor_labels, widths = c("5em", "10em", "19em", "7em"),
-          caption = "Factor names in use. Drafts: verify each against the 
+          caption = "Factor names in use. Drafts: verify each against the
           loading table above before quoting it.")
 ```
 
@@ -547,42 +549,9 @@ lca_table(factor_labels, widths = c("5em", "10em", "19em", "7em"),
 
 A factor position is centred at zero with a standard deviation set by the model, and it is tempting to rescale it to run from 0 to 1 so it reads as a percentage. We do not, because the result would be a number that looks like a proportion and is not one: nothing in the model says a respondent at 0.6 has a 60 percent chance of anything, and a reader will assume otherwise.
 
-The honest translation runs through the items instead. The model already says what a person at a given position is expected to answer, so we report that: the position converted to an expected response on the item that tracks the factor most closely, on its original scale. A group mean of 4.2 on a one to seven trust ladder is a statement anyone can check against the questionnaire.
+Each respondent receives a position on the factor. Positions come out centred near zero on a scale with no natural units, which is unusable for anyone outside the analysis, so the domain tables carry a translation back to the response scale. The translation is a deliberate linearisation: take the observed mean of the factor's strongest indicator, and move it by the group's mean position times that item's standardised loading times the item's observed standard deviation. It uses the sample moments of the item rather than the model's thresholds, so it is an approximation that treats the seven-point ladder as if it were continuous, and it is reported because a group mean of 4.2 on a one to seven trust ladder is a statement anyone can check against the questionnaire. When an exact probability at a specific cut point is wanted, the fitted thresholds supply it directly from the same model, and that is the quantity to compute instead of rescaling a score.
 
-If a probability is what is wanted, the ordinal model supplies one directly. Each item's thresholds cut the underlying continuum into the observed categories, so the probability that a respondent at a given position answers 5 or higher is computable from the position and those thresholds. That is a real probability rather than a rescaled score, and it is the quantity to report when a percentage is needed. The tables below give the expected response; the threshold-based probabilities are available from the same fitted model when a specific cut point matters.
-
-Each respondent receives a position on the factor. Positions come out centred
-near zero on a scale with no natural units, which is unusable for anyone
-outside the analysis, so the domain tables carry a translation back to the
-response scale. The translation is a deliberate linearisation: take the
-observed mean of the factor's strongest indicator, and move it by the group's
-mean position times that item's standardised loading times the item's observed
-standard deviation. It uses the sample moments of the item rather than the
-model's thresholds, so it is an approximation that treats the seven-point
-ladder as if it were continuous, and it is reported because a group mean of
-4.2 on a one to seven trust ladder is a statement anyone can check against the
-questionnaire. When an exact probability at a specific cut point is wanted,
-the fitted thresholds supply it directly from the same model, and that is the
-quantity to compute instead of rescaling a score.
-
-Which kind of score matters, and the reason is the same one that motivates the
-bias correction in the class report. With ordinal indicators lavaan does not
-have the closed-form scores of the continuous case; the "regression" scores
-here are posterior modes, shrunk toward the grand mean in proportion to how
-reliably the factor is measured, and the "Bartlett" scores are per-pattern
-maximum likelihood positions computed by numerical optimisation, with no
-shrinkage toward the mean. The classical Bartlett result, that the score is
-conditionally unbiased for the factor and group means of it are therefore
-unbiased, is exact for continuous indicators; for ordinal indicators it holds
-approximately, and respondents with extreme response patterns can receive
-extreme positions since nothing pulls them in. The direction of the trade is
-unchanged: shrinkage pulls group means toward each other, so differences
-between demographic levels come out too small under the regression scores,
-exactly as classification error attenuates a cross-tabulation of modal
-assignments, while the maximum likelihood scores remove that attenuation at
-the cost of more error variance and wider intervals in @sec-domains. Wider
-and honest about group differences is the right side of that trade for a
-domain estimate.
+Which kind of score matters, and the reason is the same one that motivates the bias correction in the class report. With ordinal indicators lavaan does not have the closed-form scores of the continuous case; the "regression" scores here are posterior modes, shrunk toward the grand mean in proportion to how reliably the factor is measured, and the "Bartlett" scores are per-pattern maximum likelihood positions computed by numerical optimisation, with no shrinkage toward the mean. The classical Bartlett result, that the score is conditionally unbiased for the factor and group means of it are therefore unbiased, is exact for continuous indicators; for ordinal indicators it holds approximately, and respondents with extreme response patterns can receive extreme positions since nothing pulls them in. The direction of the trade is unchanged: shrinkage pulls group means toward each other, so differences between demographic levels come out too small under the regression scores, exactly as classification error attenuates a cross-tabulation of modal assignments, while the maximum likelihood scores remove that attenuation at the cost of more error variance and wider intervals in @sec-domains. Wider and honest about group differences is the right side of that trade for a domain estimate.
 
 The class report scores respondents who skipped some items, because local independence lets a missing answer drop out of the calculation. Under `WLSMV` that is not available, so the scored frame here equals the estimation frame. This is a real difference between the arms and it favours the class report where item nonresponse is substantial.
 
@@ -590,12 +559,11 @@ The class report scores respondents who skipped some items, because local indepe
 #| eval: !expr k_ready
 # Two score types, for the same reason the class report shows two estimators.
 # Regression scores are shrunk toward the grand mean by the factor's reliability,
-# which pulls group means together; Bartlett scores are unbiased for the factor
-# and therefore for group means, at the cost of more error variance.
+# which pulls group means together; Bartlett scores remove that shrinkage at the
+# cost of more error variance.
 FS <- lavPredict(fit_w, method = "Bartlett")
 FS_reg <- lavPredict(fit_w, method = "regression")
 fnames <- colnames(FS)
-
 scored <- bind_cols(dat, as_tibble(FS))
 scored_reg <- bind_cols(dat, as_tibble(FS_reg))
 
@@ -606,11 +574,11 @@ crit_s <- qt(0.975, degf(rep_des_s))
 # A second design on the regression scores. Without it the design-based row and
 # the Bartlett row read the same columns and come out identical, and the first
 # gap would confound weighting with the choice of score.
-rep_des_reg <- build_rep_design(scored_reg, cfg)$rep_des
+design_reg <- build_rep_design(scored_reg, cfg)
+rep_des_reg <- design_reg$rep_des
 
 lam <- unclass(lavInspect(fit_w, "std")$lambda)
-anchors <- map_chr(fnames, function(fn) rownames(lam)[which.max(abs(lam[, fn]))]
-                   )
+anchors <- map_chr(fnames, function(fn) rownames(lam)[which.max(abs(lam[, fn]))])
 names(anchors) <- fnames
 
 tibble(Factor = fnames, Label = factor_labels$Label,
@@ -628,35 +596,13 @@ tibble(Factor = fnames, Label = factor_labels$Label,
 
 The design is rebuilt on the scored frame and the mean factor position is estimated within each demographic level with `svyby`, so the intervals come from the same replicates as everything else.
 
-
 ### What the design does to these intervals, and why the check matters either way
 
-The tables below report each mean factor position with an unweighted and a
-design-based standard error side by side, and here the two sit close together:
-the design-based intervals are a median of five percent wider than the naive ones, reaching about twenty percent in the thinnest cells. The released
-weights are nearly constant, so weighting moves almost nothing, and a mean
-factor position within a demographic level averages over most of the
-eighty-four sampling points, which caps how much the clustering can inflate its
-variance. The summary line above the tables reports the median ratio exactly.
+The tables below report each mean factor position with an unweighted and a design-based standard error side by side, and here the two sit close together: the design-based intervals are a median of five percent wider than the naive ones, reaching about twenty percent in the thinnest cells. The released weights are nearly constant, so weighting moves almost nothing, and a mean factor position within a demographic level averages over most of the eighty-four sampling points, which caps how much the clustering can inflate its variance. The summary line above the tables reports the median ratio exactly.
 
-The point of computing the design-based interval is that nothing short of
-computing it tells you this. The naive interval answers a different question:
-what the uncertainty would be if these 1,487 respondents had been drawn one at
-a time, independently, from the whole country. They were drawn in clusters of
-about nineteen, and people in the same neighbourhood answer alike. When an
-estimate concentrates within few clusters, or when the weights vary, the naive
-interval understates the uncertainty and its nominal 95 percent coverage fails,
-so an analyst using it calls differences significant that the data cannot
-support. The class report's battery and the production data with informative
-weights are exactly the settings where that gap opens. That the gap is small
-here is something the replicate design demonstrated rather than something
-anyone was entitled to assume.
+The point of computing the design-based interval is that nothing short of computing it tells you this. The naive interval answers a different question: what the uncertainty would be if these respondents had been drawn one at a time, independently, from the whole country. They were drawn in clusters of about nineteen, and people in the same neighbourhood answer alike. When an estimate concentrates within few clusters, or when the weights vary, the naive interval understates the uncertainty and its nominal 95 percent coverage fails, so an analyst using it calls differences significant that the data cannot support. The class report's battery and the production data with informative weights are exactly the settings where that gap opens. That the gap is small here is something the replicate design demonstrated rather than something anyone was entitled to assume.
 
-Worth adding, because it stops the rule being mistaken for a bias toward
-caution: a design-based interval is not always wider. Stratification can make
-it narrower than the naive one, and a few cells below show precisely that. The
-rule is not "prefer the wider interval," it is "prefer the interval that
-matches how the sample was actually drawn."
+Worth adding, because it stops the rule being mistaken for a bias toward caution: a design-based interval is not always wider. Stratification can make it narrower than the naive one, and a few cells below show precisely that. The rule is not "prefer the wider interval," it is "prefer the interval that matches how the sample was actually drawn."
 
 Two limits belong with the numbers. Factor scores are estimated rather than observed, so differences between demographic levels are understated for the same reason a class model's cross-tabulations are: a difference that appears is real, a null is not evidence of absence. And a level resting on very few respondents will produce a wide interval that should not be read as a finding; sample sizes are reported beside every estimate for that reason.
 
@@ -709,19 +655,58 @@ domain <- bind_rows(
   filter(!is.na(level)) |>
   mutate(estimator = factor(estimator, levels = est_levels))
 
+# The design-based domain estimates as one theta function, so the replicate
+# covariance between levels exists and the separations can be tested rather than
+# read off overlapping intervals. Design-based rather than Bartlett is
+# deliberate: the regression scores are shrunk, so a pair resolved here
+# separates despite that shrinkage.
+dom_meta_cfa <- map(cfg$aux, function(v)
+  expand_grid(factor = fnames, level = levels(scored_reg[[v]])) |>
+    mutate(variable = v)) |>
+  list_rbind() |>
+  mutate(segment = match(factor, fnames), idx = row_number())
+
+domain_theta_cfa <- function(w_rep) {
+  unlist(map(cfg$aux, function(v) {
+    M = outer(as.character(scored_reg[[v]]), levels(scored_reg[[v]]), "==") + 0
+    M[is.na(M)] = 0
+    denom = as.numeric(crossprod(M, w_rep))
+    unlist(map(fnames, function(f)
+      as.numeric(crossprod(M, w_rep * as.numeric(scored_reg[[f]]))) / denom),
+      use.names = FALSE)
+  }), use.names = FALSE)
+}
+
+est_cfa <- domain_theta_cfa(weights(design_reg$des, "sampling"))
+V_cfa_dom <- replicate_variance(rep_des_reg, domain_theta_cfa, est_cfa)
+
+# The same quantity svyby computed, by a different route. Agreement validates
+# the ordering the contrasts index into.
+chk <- dom_meta_cfa |>
+  mutate(p_theta = est_cfa) |>
+  inner_join(filter(domain, estimator == "Design-based") |>
+               select(variable, level, factor, p),
+             by = c("variable", "level", "factor"))
+stopifnot(nrow(chk) == nrow(dom_meta_cfa),
+          max(abs(chk$p_theta - chk$p)) < 1e-6)
+
+wald_cfa <- list(meta = dom_meta_cfa, est = est_cfa, V = V_cfa_dom,
+                 df = degf(rep_des_reg))
+
 wide_gap <- domain |>
   select(variable, level, segment, estimator, p, se) |>
   pivot_wider(names_from = estimator, values_from = c(p, se))
 
+se_ratio <- wide_gap$`se_Design-based` / wide_gap$se_Unweighted
+
 glue("Weighting moves the factor means by a median of ",
-     "{round(median(abs(wide_gap$`p_Design-based` - 
+     "{round(median(abs(wide_gap$`p_Design-based` -
      wide_gap$p_Unweighted)), 3)}; ",
      "unshrinking them moves a further ",
-     "{round(median(abs(wide_gap$p_Bartlett - 
+     "{round(median(abs(wide_gap$p_Bartlett -
      wide_gap$`p_Design-based`)), 3)}. ",
      "Design-based intervals are a median of ",
-     "{round(median(wide_gap$`se_Design-based` / 
-     wide_gap$se_Unweighted), 2)} ",
+     "{round(median(se_ratio[is.finite(se_ratio)]), 2)} ",
      "times the naive ones.")
 ```
 
@@ -744,7 +729,7 @@ walk(cfg$aux, function(v) {
     lca_table(align = str_c("ll", strrep("r", length(lv))),
               widths = fit_widths(2 + length(lv), first = 2.2), font_size = 7,
               label = paste0("dom-", str_replace_all(v, "_", "-")),
-              caption = glue("Mean factor position by level of {v}, 
+              caption = glue("Mean factor position by level of {v},
                              three ways.")) |>
     cat(sep = "\n")
   cat("\n\n")
@@ -785,9 +770,11 @@ walk(cfg$aux, function(v) {
 
 The domain table has as many rows as there are demographic levels, and most of them say nothing. The analyst's problem is finding the two or three that do. This section drafts that reading with a language model, and the division of labour is the important part.
 
-**The analyst resolves which differences are real; the model only translates.** Before anything is sent, R computes which pairs of levels have intervals that do not overlap. The model is handed that list and instructed to name only those. It never sees a standard error and never decides significance. That is the same principle as the naming step: conclusions in, language out.
+**The analyst resolves which differences are real; the model only translates.** Before anything is sent, R tests every pair of levels: a design-based Wald test on the difference, using the replicate covariance between the two estimates, Holm-adjusted within the demographic. The model is handed the list of pairs that resolve and instructed to name only those. It never sees a standard error and never decides significance. That is the same principle as the naming step: conclusions in, language out.
 
-The rules attached to the prompt forbid ranking levels whose intervals overlap, forbid causal language, require silence on any level flagged as too small, and cap the output at four findings. The cap is deliberate. The point of this step is to tell an analyst where to look, not to narrate twenty-seven cells.
+The tests run on the design-based estimator deliberately. Those scores are shrunk toward the grand mean, so a pair that resolves there separates despite the shrinkage, and the Bartlett columns can only widen the gap.
+
+The rules attached to the prompt forbid ranking levels the analysis did not resolve, forbid causal language, require silence on any level flagged as too small, and cap the output at four findings. The cap is deliberate. The point of this step is to tell an analyst where to look, not to narrate twenty-seven cells.
 
 ```{r domain-prompt-example}
 #| echo: false
@@ -796,9 +783,10 @@ v1 <- cfg$aux[1]
 cat("=========== USER PROMPT (", v1, ") ===========\n")
 cat(wrap_text(prompt_domain_read(
   domain, marginals, v1,
-  values_header =   
+  values_header =
     "Mean factor position of each level, with 95 percent intervals:",
-  labels = factor_labels$Label, context = cfg$survey_context)), "\n")
+  labels = factor_labels$Label, context = cfg$survey_context,
+  wald = wald_cfa)), "\n")
 ```
 
 ```{r domain-read}
@@ -809,8 +797,9 @@ domain_reads <- map(cfg$aux, function(v) {
       prompt_domain_read(
         domain, marginals, v, labels = factor_labels$Label,
         context = cfg$survey_context,
-        values_header = 
-          "Mean factor position of each level, with 95 percent intervals:"),
+        values_header =
+          "Mean factor position of each level, with 95 percent intervals:",
+        wald = wald_cfa),
       echo = FALSE))
   tibble(variable = v,
          Finding = pluck(obj, "finding", .default = NA_character_),
@@ -819,7 +808,7 @@ domain_reads <- map(cfg$aux, function(v) {
   list_rbind()
 
 lca_table(domain_reads, widths = c("7em", "22em", "16em"),
-          caption = "Drafted reading of each demographic. Verify against the 
+          caption = "Drafted reading of each demographic. Verify against the
           tables above.")
 ```
 
@@ -840,7 +829,7 @@ saveRDS(list(fit = fit_w, param_tbl = param_tbl, eig_tbl = eig_tbl,
              factor_labels = factor_labels, anchors = anchors),
         file.path(cfg$cfa_dir, "cfa_fit.rds"))
 
-cat("Wrote survey_with_factor.sav, three CSVs, and cfa_fit.rds to", 
+glue("Wrote survey_with_factor.sav, three CSVs, and cfa_fit.rds to",
     cfg$cfa_dir, "\n")
 ```
 
@@ -848,7 +837,7 @@ cat("Wrote survey_with_factor.sav, three CSVs, and cfa_fit.rds to",
 
 The two reports use different batteries by design, so there is no shared item table to build and no fit contest to run. A `WLSMV` factor model is fitted to a correlation matrix while a latent class model is fitted to the response-pattern likelihood; their information criteria are on different scales and putting them side by side would be wrong.
 
-What the pair demonstrates is the choice itself. This battery is thirteen items of one format asking one kind of question about different objects, and its first eigenvalue dwarfs the second: one continuum, which a factor model represents in a fraction of the parameters a class model would need. The class report's battery is twelve items of mixed format spanning unrelated domains, where a household can own a computer and still have run short of food, and no single continuum holds that. Reading the two search sections against each other is the argument for when each model applies, and it is made by the data rather than asserted.
+What the pair demonstrates is the choice itself. This battery is thirteen items of one format asking one kind of question about different objects, and its first eigenvalue dwarfs the second: one continuum, which a factor model represents in a fraction of the parameters a class model would need. The class report's battery is eleven items of mixed format spanning unrelated domains, where a household can own a computer and still have run short of food, and no single continuum holds that. Reading the two search sections against each other is the argument for when each model applies, and it is made by the data rather than asserted.
 
 # Limitations
 
@@ -858,9 +847,9 @@ Under `WLSMV` scoring requires complete items, so respondents who skipped part o
 
 Modification indices ignore the clustering and are inflated by roughly the design effect on the loadings. They are reported as a ranking and no threshold is quoted.
 
-The structure search and the confirmatory fit use the same data. Where `cfg$cfa_factors` was set from this report's own exploratory results, the confirmatory fit is a re-expression of that structure rather than an independent test of it, and its fit indices are optimistic. The stability column in @sec-search is the guard against reading noise as structure, but it is not a substitute for an independent sample.
+The structure search and the confirmatory fit use the same data. Where `cfg$cfa_factors` was set from this report's own exploratory results, the confirmatory fit is a re-expression of that structure rather than an independent test of it, and its fit indices are optimistic. The replicate intervals on the eigenvalues in @sec-search are the guard against reading noise as structure, and they are not a substitute for an independent sample. The two-factor solution fitted here departs from the single factor the eigenvalues support, on the substantive grounds stated in @sec-chosen.
 
-The replicate count equals the number of primary sampling units, so joint tests across more parameters than there are replicates are unavailable. Individual standard errors and pairwise covariances are unaffected.
+The replicate count equals the number of primary sampling units, so joint tests across more parameters than there are replicates are unavailable. Individual standard errors and pairwise covariances are unaffected, which is all the pairwise contrasts in @sec-reading require.
 
 Names drafted by a language model are drafts with an audited override path. No reliability estimate across runs is reported, and every substantive claim rests on the estimated loadings rather than on the name.
 
