@@ -76,7 +76,7 @@ format:
 # =============================================================================
 #  CUT GUIDE. Slides tagged [CORE] or [OPTIONAL]; [BACKUP] live after the ask
 #  and are never shown unless asked. Fifteen minutes is CORE only.
-#  Cut order if running long: k-means, local independence, prompt detail.
+#  Cut order if running long: k-means, then merge the model slide into design.
 # =============================================================================
 execute:
   echo: false
@@ -135,33 +135,27 @@ small <- slice_min(prev, p, n = 1)
 ## This project started with a battery and no principled way to summarize it {.shrink}
 
 <!-- [CORE] 1 -->
+
 \bottomline{We field `r n_items` items to measure something no respondent answers directly, and how we combine them has always been settled by convention rather than by evidence.}
 
-\begin{columns}[T]
-\begin{column}{0.52\textwidth}
-\kicker{the two defaults}
-\small
-\begin{itemize}\itemsep4pt
-  \item \textbf{Average them into an index.} Readable, but it assumes every respondent differs from every other only in \emph{how much}.
-  \item \textbf{Report all `r n_items` separately.} Faithful, but no policymaker product can carry `r n_items` lines, so someone collapses them anyway, off the record.
-\end{itemize}
-\end{column}
-\begin{column}{0.44\textwidth}
-\kicker{the question nobody had tested}
-\small
-Is the index a summary of the battery, or an artifact of the decision to build one?
+\vspace{1.2em}
 
-\vspace{0.5em}
+\begin{center}
+\large
+Average them into an index. \quad Or report all `r n_items` separately.
 
-That is an empirical question. This project answers it, and carries the sample design through the answer.
-\end{column}
-\end{columns}
+\vspace{0.9em}
 
-\note{Ninety seconds. Name the concrete request that started this: someone asked for one number off this battery for a country product. Both available answers were defaults nobody had ever checked. Do not defend the method yet.}
+\normalsize\color{vteal}
+Nobody had tested whether either is right for this battery.
+\end{center}
+
+\note{Ninety seconds. Name the concrete request that started this: someone asked for one number off this battery for a country product. The index is readable but assumes everyone differs only in how much. Reporting all items is faithful but no product can carry it, so someone collapses them anyway, off the record. Is the index a summary of the battery or an artifact of the decision to build one? That is empirical, and this project answers it with the sample design carried through.}
 
 ## Nobody in our data was ever asked the question we report on {.shrink}
 
 <!-- [CORE] 2 -->
+
 \bottomline{Every statement we publish about `r params$concept` is an inference from proxies, and its quality depends entirely on how those proxies are combined.}
 
 \vspace{0.3em}
@@ -174,10 +168,10 @@ That is an empirical question. This project answers it, and carries the sample d
   \node[draw=vteal,rounded corners,minimum width=2.6cm] (i2) at (-1.5,-2.6) {Ran short of food};
   \node[draw=vteal,rounded corners,minimum width=2.6cm] (i3) at (1.6,-2.6) {Feels unsafe};
   \node[draw=vteal,rounded corners,minimum width=2.6cm] (i4) at (4.7,-2.6) {Receives aid};
-  \draw[-{Latex},vteal] (i1) -- (concept);
-  \draw[-{Latex},vteal] (i2) -- (concept);
-  \draw[-{Latex},vteal] (i3) -- (concept);
-  \draw[-{Latex},vteal] (i4) -- (concept);
+  \draw[-{Latex},vteal] (concept) -- (i1);
+  \draw[-{Latex},vteal] (concept) -- (i2);
+  \draw[-{Latex},vteal] (concept) -- (i3);
+  \draw[-{Latex},vteal] (concept) -- (i4);
   \node[font=\scriptsize,text=vpurple] at (7.0,-1.3) {\ldots and `r n_items - 4` more};
 \end{tikzpicture}
 \end{center}
@@ -186,11 +180,12 @@ That is an empirical question. This project answers it, and carries the sample d
 
 \centering\small On what basis do we decide that these `r n_items` answers add up to that one thing?
 
-\note{This is the hook. Say the concept out loud, then say no one was asked it. Ask the question on the last line and pause. Do not answer it yet. Swap the four item labels for the ones on the country account.}
+\note{This is the hook. The arrows run from the concept to the items on purpose: the thing we report is what drives the answers, and each item is a fallible reading of it. That is why no single item is the concept and why combining them is a decision. Say the concept out loud, then say no one was asked it. Ask the closing question and pause. Swap the four item labels for the country account before presenting.}
 
 ## A battery can differ in degree or in kind, and only one summary is right {.shrink}
 
 <!-- [CORE] 3 -->
+
 \bottomline{If people differ in how much, one scale describes them; if they differ in which answers they favor, that scale averages opposite people into a middle where nobody actually sits.}
 
 ```{r fork-figure}
@@ -218,42 +213,32 @@ tibble(kind = rep(c("Degree: one scale describes them",
   theme_slide()
 ```
 
-\centering\small Which picture our battery matches is a question the data can answer. Until now we have answered it by assumption.
+\centering\small Which picture our battery matches is a question the data can answer.
 
-\note{No real data on this slide on purpose. Left panel: an index is fine, the groups differ only in level. Right panel: the lines cross, an index puts both groups at the same middling number. Forty-five seconds.}
+\note{No real data on this slide on purpose. Left panel: an index is fine, the groups differ only in level. Right panel: the lines cross, an index puts both groups at the same middling number. Until now we have answered this by assumption. Forty-five seconds.}
 
 ## Roadmap {.shrink}
 
 <!-- [CORE] 4 -->
+
 \bottomline{You have the question; here is the order in which the rest of this answers it.}
 
-\vspace{0.5em}
+\vspace{0.8em}
 
-\begin{columns}[T]
-\begin{column}{0.52\textwidth}
-\begin{enumerate}\itemsep5pt
+\begin{enumerate}\itemsep7pt
   \item \textbf{What we found} on `r params$study`
   \item \textbf{How the method decides} degree versus kind
   \item \textbf{Why the sample design} changes the answer
   \item \textbf{Where AI fits}, and where it must not
   \item \textbf{What I need from you}: how to capture this in production
 \end{enumerate}
-\end{column}
-\begin{column}{0.44\textwidth}
-\small
-\textbf{The claim in one line}
 
-\vspace{0.4em}
-
-Grouping survey items into a population inference is a measurement decision and a design decision at once. Doing either alone gives a number we cannot defend.
-\end{column}
-\end{columns}
-
-\note{Thirty seconds, no more. The roadmap is here rather than up front because slides 1 to 3 gave it something to organize.}
+\note{Thirty seconds, no more. The roadmap is here rather than up front because slides 1 to 3 gave it something to organize. The claim in one line, said not shown: grouping survey items into a population inference is a measurement decision and a design decision at once, and doing either alone gives a number we cannot defend.}
 
 ## On `r params$study`, the answer is kind, not degree {.shrink}
 
 <!-- [CORE] 5 -->
+
 \bottomline{The battery does not line respondents up on one scale; it separates them into `r K_star` recognizable groups, which means an index built from it has been averaging distinct publics together.}
 
 ```{r profiles}
@@ -281,13 +266,14 @@ map(seq_along(fit_w$rho), function(j) {
   theme(axis.text.x = element_text(angle = 40, hjust = 1, size = 7))
 ```
 
-\centering\small Lines that cross are the evidence: these groups reorder the items rather than sitting above and below each other.
+\centering\small Lines that cross are the evidence: these groups reorder the items.
 
 \note{The payoff. Walk two segments only, by name, and point at one crossing. Resist naming all of them. Sixty seconds.}
 
 ## These are population shares, not clusters that exist only in this file {.shrink}
 
 <!-- [CORE] 6 -->
+
 \bottomline{Each segment is estimated as a share of the adult population with its own margin of error, so these are numbers a product can carry.}
 
 ```{r prevalences}
@@ -304,13 +290,14 @@ prev |>
   theme_slide()
 ```
 
-\small The largest segment is `r sprintf("%.0f%%", 100 * big$p)` of adults (`r sprintf("%.0f to %.0f%%", 100 * big$lo, 100 * big$hi)`); the smallest is `r sprintf("%.0f%%", 100 * small$p)`. Intervals come from the sample design, not from a formula that assumes independent respondents.
+\small Largest segment: `r sprintf("%.0f%%", 100 * big$p)` of adults (`r sprintf("%.0f to %.0f%%", 100 * big$lo, 100 * big$hi)`). Smallest: `r sprintf("%.0f%%", 100 * small$p)`.
 
-\note{The word to land is population. A cluster analysis gives you groups in this file; this gives you shares of the country with uncertainty attached. Forty-five seconds.}
+\note{The word to land is population. A cluster analysis gives you groups in this file; this gives you shares of the country with uncertainty attached, and the intervals come from the sample design rather than from a formula assuming independent respondents. Forty-five seconds.}
 
 ## The segments cut across `r str_to_lower(params$focus_demo_label)` in ways the toplines hide {.shrink}
 
 <!-- [CORE] 7 -->
+
 \bottomline{Groups that look similar on a topline concentrate in different segments, which is why subgroup trends built on an index have looked flat.}
 
 ```{r demo-composition}
@@ -337,6 +324,7 @@ dom |>
 ## What we would have reported, and what the data support {.shrink}
 
 <!-- [CORE] 8 -->
+
 \bottomline{Reading across the three versions shows first what ignoring the sample design costs, then what forcing each respondent into one box costs, and the second gap is the larger one.}
 
 ```{r three-estimators}
@@ -361,149 +349,129 @@ dom |>
         axis.text.x = element_text(size = 6.5))
 ```
 
-\small\textbf{Unweighted} is the plain cross-tab. \textbf{Design-based} adds the weights and the clustering. \textbf{Corrected} additionally undoes the shrinkage that assigning each respondent to one segment introduces.
+\small \textbf{Unweighted} is the plain cross-tab. \textbf{Design-based} adds the weights and the clustering. \textbf{Corrected} undoes the shrinkage that one-box assignment introduces.
 
-\note{Do not explain BCH here. The point is that the three rows are different and only the third is defensible. If asked how the correction works, go to backup. Sixty seconds.}
+\note{Do not explain the correction here. The point is that the three rows are different and only the third is defensible. If asked how it works, go to backup. Sixty seconds.}
 
 ## The method groups respondents by pattern, not by score {.shrink}
 
 <!-- [CORE] 9 -->
+
 \bottomline{A latent class model asks which answers travel together, so it can find people who are secure on some items and exposed on others, which a scale cannot represent.}
 
-\begin{columns}[T]
-\begin{column}{0.50\textwidth}
-\kicker{what the model estimates}
-\small
-\begin{itemize}\itemsep3pt
+\vspace{0.9em}
+
+\large The model estimates three things:
+
+\vspace{0.5em}
+
+\begin{itemize}\itemsep8pt
   \item How many kinds of respondent there are
   \item For each kind, the probability of every answer to every item
   \item For each respondent, which kind they most resemble, and how sure we are
 \end{itemize}
-\end{column}
-\begin{column}{0.46\textwidth}
-\kicker{why it suits us}
-\small
-Measurement error becomes a parameter we estimate rather than noise we hope cancels. Each item is treated as a fallible reading of something we cannot observe.
 
-\vspace{0.4em}
-
-The number of groups is never chosen by the software. The analyst reads the evidence and records the decision.
-\end{column}
-\end{columns}
-
-\note{The only conceptual slide. No equations for this room. Sixty seconds.}
+\note{The only conceptual slide, sixty seconds. Two points to say rather than show: measurement error becomes a parameter we estimate, since each item is treated as a fallible reading of something unobserved; and the number of groups is never chosen by the software, the analyst reads the evidence and records the decision. Both matter to this audience and both land better spoken.}
 
 ## k-means would have returned groups whether or not any existed {.shrink}
 
 <!-- [OPTIONAL] 10 -->
+
 \bottomline{Clustering gives whatever number of groups we ask for, cannot use the survey weights, and reports no uncertainty, so it cannot tell us a segment is real or how large it is in the country.}
 
-\vspace{0.4em}
+\vspace{0.6em}
 
 \small
-\begin{tabular}{p{4.8cm} p{4.6cm} p{4.6cm}}
+\begin{tabular}{p{4.6cm} p{4.4cm} p{4.6cm}}
 \toprule
  & \textbf{k-means} & \textbf{This method} \\
 \midrule
-How many groups & Whatever $k$ you pass & Evidence plus a recorded analyst decision \\
+How many groups & Whatever $k$ you pass & Evidence plus a recorded decision \\
 Survey weights & Not used & Enter every estimate \\
-Clustered sample & Ignored & Carried through every margin of error \\
+Clustered sample & Ignored & Carried through every interval \\
 Uncertainty & None reported & Interval on every quantity \\
 Mixed item formats & Distance is arbitrary & Handled natively \\
 \bottomrule
 \end{tabular}
 
-\note{This answers the question already in the room. If time is short this is the first cut, but only if nobody in the audience does cluster analysis.}
+\note{This answers the question already in the room. First cut if time is short, but only if nobody in the audience does cluster analysis.}
 
 ## Our samples are clustered and weighted, so default software understates uncertainty {.shrink}
 
 <!-- [CORE] 11 -->
+
 \bottomline{Respondents arrive in neighborhood clusters of about `r params$mean_cluster` under a stratified design, and standard packages compute margins of error as though each had been drawn independently.}
 
-\begin{columns}[T]
-\begin{column}{0.48\textwidth}
-\kicker{this design}
-\small
-`r format(params$n_total, big.mark = ",")` respondents \textbullet{} `r params$n_strata` strata \textbullet{} `r params$n_psu` sampling points \textbullet{} `r params$design_df` degrees of freedom
+\vspace{0.6em}
 
-\vspace{0.5em}
+\centering
 
-People in the same neighborhood answer alike, so `r format(params$n_total, big.mark = ",")` interviews carry less information than `r format(params$n_total, big.mark = ",")` independent ones. Every interval here is rebuilt `r params$n_psu` times, leaving out one sampling point each time.
-\end{column}
-\begin{column}{0.48\textwidth}
+`r format(params$n_total, big.mark = ",")` respondents \textbullet{} `r params$n_strata` strata \textbullet{} `r params$n_psu` sampling points
+
+\vspace{0.9em}
+
+\raggedright
 \kicker{errors this addresses}
-\small
-\begin{itemize}\itemsep2pt
+\begin{itemize}\itemsep5pt
   \item \textbf{Sampling error} estimated from the design we actually used
   \item \textbf{Measurement error} estimated as a parameter, not assumed away
   \item \textbf{Item nonresponse}: partial responders scored, not discarded
   \item \textbf{Classification error} introduced by the method, then corrected
 \end{itemize}
-\end{column}
-\end{columns}
 
-\note{Weighting they know. Clustering they mostly do not. Spend the extra beat on the left column. The right column is the total survey error content without the framework diagram. Seventy seconds.}
+\note{Seventy seconds. Weighting they know; clustering they mostly do not, so narrate it: people in the same neighborhood answer alike, which means these interviews carry less information than the same number of independent ones, and every interval here is rebuilt `r params$n_psu` times, leaving out one sampling point each time. The four items are the total survey error content without the framework diagram.}
 
 ## Treating the measurement model as known understates our uncertainty {.shrink}
 
 <!-- [CORE] 12 -->
+
 \bottomline{When we also rebuild the model itself inside every replicate, the margins of error roughly double, so intervals computed the standard way are optimistic and some differences do not survive.}
 
-\vspace{0.5em}
+\vspace{1.0em}
 
-\begin{columns}[T]
-\begin{column}{0.52\textwidth}
-\small
-Standard practice fits the measurement model once and treats it as fixed when estimating subgroup shares. Refitting it inside every replicate multiplies the margins of error by a median of \textbf{`r params$step1_median`} and by as much as \textbf{`r params$step1_max`}.
-\end{column}
-\begin{column}{0.44\textwidth}
-\small
-\textbf{What this means for a product}
+\\begin{center} \large Refitting the model in every replicate multiplies the margins of error by a median of \\textbf{`r params$step1_median`}, and by as much as \\textbf{`r params$step1_max`}. \\end{center}
 
-\vspace{0.4em}
+\vspace{0.8em}
 
-Report the segment shares. Be slower to report that two subgroups differ, and check that the difference survives the wider interval before it reaches a briefing.
-\end{column}
-\end{columns}
+\centering\small Report the segment shares. Be slower to report that two subgroups differ.
 
-\note{This is the credibility slide. Volunteering it buys trust in everything else. Say plainly that we found this because we checked, and that the check is not standard practice. Fifty seconds.}
+\note{The credibility slide. Standard practice fits the measurement model once and treats it as fixed. We checked, and the check is not standard practice. Volunteering this buys trust in everything else on screen. Before a difference reaches a briefing, confirm it survives the wider interval. Fifty seconds.}
 
 ## The language model names segments and never touches a number {.shrink}
 
 <!-- [CORE] 13 -->
+
 \bottomline{An LLM drafts segment names and reads the subgroup tables under a fixed instrument, after every estimate is final, so a wrong name is a wording problem and never a statistical one.}
 
 \begin{columns}[T]
 \begin{column}{0.48\textwidth}
 \kicker{what it sees}
-\small
-\begin{itemize}\itemsep2pt
+\begin{itemize}\itemsep4pt
   \item Response probabilities, one segment at a time
   \item The question wording
-  \item Which subgroups the analysis resolved
+  \item Which differences the analysis resolved
 \end{itemize}
 \end{column}
 \begin{column}{0.48\textwidth}
-\kicker{what it never sees or does}
-\small
-\begin{itemize}\itemsep2pt
-  \item No margins of error, no test statistics
-  \item Never decides whether a difference is real
-  \item Never combines probabilities
-  \item Names freeze to a file the analyst edits
+\kicker{what it never does}
+\begin{itemize}\itemsep4pt
+  \item Sees a margin of error
+  \item Decides whether a difference is real
+  \item Enters any calculation
 \end{itemize}
 \end{column}
 \end{columns}
 
-\vspace{0.4em}
+\vspace{0.5em}
 
-\centering\small Names vary between runs, which is exactly why they are drafts and never enter a calculation.
+\centering\small Names vary between runs; that is why they are drafts, frozen to a file the analyst edits.
 
-\note{Say the guardrails as constraints we imposed, not as limitations we discovered. This is the slide that makes the AI use defensible rather than fashionable. Fifty seconds.}
+\note{Fifty seconds. Say the guardrails as constraints we imposed, not limitations we discovered. R computes which differences hold; the model only puts the resolved list into English. Editing the frozen file is how a human takes over. This is the slide that makes the AI use defensible rather than fashionable.}
 
 ## The same pipeline runs on any country and any battery {.shrink}
 
 <!-- [CORE] 14 -->
+
 \bottomline{Porting to a new account changes six things, all in one configuration file, and the method applies wherever respondents differ in which answers they favor rather than how much.}
 
 \begin{columns}[T]
@@ -519,13 +487,13 @@ Everything else, including every margin of error, is unchanged.
 \begin{column}{0.48\textwidth}
 \kicker{where it could go next}
 \small
-\begin{itemize}\itemsep2pt
+\begin{itemize}\itemsep3pt
   \item A second country on the same battery
   \item A different topic domain
-  \item The same country across rounds, to see whether a segment is growing
+  \item The same country across rounds
 \end{itemize}
 
-\vspace{0.3em}
+\vspace{0.4em}
 
 Which account wants to go first?
 \end{column}
@@ -536,6 +504,7 @@ Which account wants to go first?
 ## The details cannot go in a policymaker product, so where do they live? {.shrink}
 
 <!-- [CORE] 15 -->
+
 \bottomline{A two-page product can carry a segment name and a share, but not the design, the corrections, or the caveats, and I want your read on how we capture that so it survives past any one analyst.}
 
 \vspace{0.4em}
@@ -546,15 +515,15 @@ Which account wants to go first?
 \small
 \begin{enumerate}\itemsep3pt
   \item A standing \textbf{methods annex} per account that each product links to
-  \item A shared \textbf{archive}: configuration, diagnostics, and frozen segment names, citable per run
-  \item A \textbf{one-pager} that travels with each product: what the segments are, what the intervals mean, what the method cannot support
+  \item A shared \textbf{archive}: configuration, diagnostics, frozen names, citable per run
+  \item A \textbf{one-pager} that travels with each product
 \end{enumerate}
 \end{column}
 \begin{column}{0.46\textwidth}
 \kicker{what i need answered}
 \small
 \begin{itemize}\itemsep3pt
-  \item What must be preserved for someone to reproduce a published number in two years?
+  \item What must be preserved to reproduce a published number in two years?
   \item Who reviews a segment name before it reaches a briefing?
   \item What is the minimum caveat that must appear in the product itself?
 \end{itemize}
@@ -568,10 +537,12 @@ Which account wants to go first?
 ## How the correction works {.shrink}
 
 <!-- [BACKUP] -->
+
 \bottomline{Assigning each respondent to their most likely segment misclassifies some of them, which pulls subgroup differences toward each other; the correction estimates that misclassification and undoes it.}
 
 \small
-The model tells us, for every respondent, the probability of belonging to each segment. Those probabilities imply a table: of everyone truly in segment A, what share gets assigned to A, to B, and so on. Inverting that table reweights the cross-tab so the differences come back to their unattenuated size. The reweighting can push a cell slightly outside 0 to 100 percent, which is a property of the correction rather than an error.
+
+The model gives, for every respondent, the probability of belonging to each segment. Those probabilities imply a table: of everyone truly in segment A, what share gets assigned to A, to B, and so on. Inverting that table reweights the cross-tab so the differences come back to their unattenuated size. The reweighting can push a cell slightly outside 0 to 100 percent, which is a property of the correction rather than an error.
 
 \note{Only if asked. Do not volunteer.}
 
@@ -586,7 +557,7 @@ enum |>
   kable(booktabs = TRUE, align = "r")
 ```
 
-\small Lower BIC is better fit for the parameters spent; entropy near 1 means respondents are cleanly separated. Neither decides alone, and the software never picks. The analyst reads these with the profiles and records the choice.
+\small Lower BIC is better fit for the parameters spent; entropy near 1 means respondents are cleanly separated. Neither decides alone, and the software never picks.
 
 ## Which items are doing the work {.shrink}
 
@@ -599,12 +570,14 @@ item_discrim |>
   kable(booktabs = TRUE, align = "lr")
 ```
 
-\small Separation is the average probability gap between two segments on that item, from 0 to 1. An item near 0 is carrying nothing and is a candidate for removal.
+\small Separation is the average probability gap between two segments on that item, from 0 to 1. An item near 0 is carrying nothing.
 
 ## Validated against an independent implementation {.shrink}
 
 <!-- [BACKUP] -->
+
 \bottomline{At equal weights our estimator and a published package must agree, and the pipeline checks this on every run rather than asserting it.}
 
 \small
+
 Largest gap in segment sizes: `r sprintf("%.5f", validation$max_pi_gap)`. Largest gap in response probabilities: `r sprintf("%.5f", validation$max_rho_gap)`. The run halts if these exceed a tolerance.
