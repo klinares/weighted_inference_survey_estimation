@@ -520,7 +520,7 @@ ggplot(edges) +
                  linewidth = discrimination, alpha = discrimination),
              curvature = 0.12, colour = viridisLite::viridis(1, begin = 0.45)) +
   geom_label(aes(x = 0.40, y = (y + (J + 1) / 2) / 2, label = sprintf("%.2f", discrimination)),
-             size = 2.2, label.size = 0, fill = "white") +
+             size = 2.2, linewidth = 0, fill = "white") +
   geom_text(aes(x = x1 + 0.02, y = y, label = item), hjust = 0, size = 2.9) +
   annotate("label", x = 0.12, y = (J + 1) / 2,
            label = glue("Segment\nK = {K_star}\n\n{seg_txt}"),

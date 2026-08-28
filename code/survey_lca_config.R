@@ -87,7 +87,7 @@ cfg <- list(
   cats = cats,
   min_items = min_items,
   
-  K_range = 2:10,
+  K_range = 2:12,
   K_force = 4,
   n_starts = 200,
   

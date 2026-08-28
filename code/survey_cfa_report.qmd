@@ -196,7 +196,7 @@ efa_tbl |>
 
 ## Reading the loadings
 
-A loading table is the factor-analytic equivalent of the class report's response profiles: it is where the analyst decides whether a solution makes sense. Loadings below 0.40 are blanked so the pattern is visible. Three flags are worth acting on. An item that loads nowhere is not being measured by any factor. An item that loads on two is ambiguous and usually means the solution has been pushed too far. An item whose communality falls below 0.30 shares almost nothing with the rest of the battery regardless of how many factors are extracted, and is a candidate for `cfa_drop`.
+A loading table is the factor-analytic equivalent of the class report's response profiles: it is where the analyst decides whether a solution makes sense. Loadings below 0.40 are blanked so the pattern is visible. Three flags are worth acting on. An item that loads nowhere is not being measured by any factor. An item that loads on two is ambiguous and usually means the solution has been pushed too far. An item whose communality falls below 0.30 shares almost nothing with the rest of the battery regardless of how many factors are extracted, and is a candidate for `cfa_drop`. Communality here is $\operatorname{diag}(\Lambda\Phi\Lambda')$ rather than the sum of an item's squared loadings, because `geomin` rotates obliquely and the factors correlate. Summing the squares would understate a cross-loading item by $2r\lambda_1\lambda_2$ per pair of factors, which at a factor correlation of 0.5 is enough to put an item under the line that the battery in fact accounts for.
 
 ```{r loadings}
 #| echo: false
@@ -437,11 +437,11 @@ ggplot(edges) +
              inherit.aes = FALSE) +
   geom_label(data = node_pairs,
              aes(x = 0.135, y = (y1 + y2) / 2, label = sprintf("%.2f", rho)),
-             size = 2.4, label.size = 0, fill = "white",
+             size = 2.4, linewidth = 0, fill = "white",
              label.padding = unit(1.5, "pt"), inherit.aes = FALSE) +
   geom_label(aes(x = 0.42, y = (y + ny) / 2, label = sprintf("%.2f", loading),
                  colour = factor),
-             size = 2.2, label.size = 0, fill = "white",
+             size = 2.2, linewidth = 0, fill = "white",
              label.padding = unit(1.5, "pt")) +
   geom_text(aes(x = 0.60, y = y, label = item), data = assign_tbl,
             hjust = 0, size = 2.9, inherit.aes = FALSE) +
@@ -538,6 +538,26 @@ if (file.exists(lab_path)) {
 
 stopifnot(nrow(factor_labels) == length(fnames))
 
+# Every use of factor_labels below indexes it by position in fnames, so the
+# frozen file has to be in that order. A file the analyst re-sorted while
+# editing a name, or one written under a different factor ordering, would
+# otherwise attach each name to the wrong factor and pass the row-count check
+# while doing it -- a presentation error with no symptom, which is the failure
+# this freeze file exists to prevent. Match on the factor column instead.
+missing_f <- setdiff(fnames, factor_labels$factor)
+extra_f   <- setdiff(factor_labels$factor, fnames)
+if (length(missing_f) || length(extra_f))
+  stop("factor_labels.csv does not describe this model. ",
+       if (length(missing_f))
+         paste0("Missing: ", paste(missing_f, collapse = ", "), ". "),
+       if (length(extra_f))
+         paste0("Names a factor this model does not have: ",
+                paste(extra_f, collapse = ", "), ". "),
+       "Delete the file and re-render, or fix its factor column.",
+       call. = FALSE)
+
+factor_labels <- factor_labels[match(fnames, factor_labels$factor), ]
+
 lca_table(factor_labels, widths = c("5em", "10em", "19em", "7em"),
           caption = "Factor names in use. Drafts: verify each against the
           loading table above before quoting it.")
@@ -564,8 +584,29 @@ The class report scores respondents who skipped some items, because local indepe
 FS <- lavPredict(fit_w, method = "Bartlett")
 FS_reg <- lavPredict(fit_w, method = "regression")
 fnames <- colnames(FS)
-scored <- bind_cols(dat, as_tibble(FS))
-scored_reg <- bind_cols(dat, as_tibble(FS_reg))
+
+# Bartlett scores are unbounded and have no finite optimum for a small number of
+# near-floor response patterns, which come back NA; regression scores are bounded
+# by the prior and are always finite. Both arms must describe the same
+# respondents, or the contrast between them confounds shrinkage with sample
+# composition, which is the one thing this pair of designs exists to rule out.
+# The excluded cases are idiosyncratic patterns rather than the tails of the
+# factor: respondents at the floor on every item score without trouble.
+scorable <- complete.cases(FS)
+
+if (!all(scorable)) {
+  message(sum(!scorable), " of ", nrow(dat), " respondents have no Bartlett ",
+          "score. Both score types are compared on the remaining ",
+          sum(scorable), ".")
+}
+if (mean(!scorable) > 0.02) {
+  stop("More than 2% of respondents are unscored under Bartlett. Investigate ",
+       "the failing response patterns before reporting either score type.",
+       call. = FALSE)
+}
+
+scored     <- bind_cols(dat, as_tibble(FS))[scorable, ]
+scored_reg <- bind_cols(dat, as_tibble(FS_reg))[scorable, ]
 
 design_s <- build_rep_design(scored, cfg)
 rep_des_s <- design_s$rep_des
@@ -581,15 +622,33 @@ lam <- unclass(lavInspect(fit_w, "std")$lambda)
 anchors <- map_chr(fnames, function(fn) rownames(lam)[which.max(abs(lam[, fn]))])
 names(anchors) <- fnames
 
-tibble(Factor = fnames, Label = factor_labels$Label,
-       Mean = round(colMeans(FS), 3), SD = round(apply(FS, 2, sd), 3),
-       Indicator = anchors,
-       Loading = round(map_dbl(fnames, function(fn) lam[anchors[[fn]], fn]),
-                       2)) |>
-  lca_table(align = "llrrlr", widths = fit_widths(6, first = 1.6),
+# Mean and SD are design-weighted; an unweighted mean here would be the one
+# quantity in the report describing the sample instead of the population.
+# IQR and Extreme sit beside SD because an unbounded estimator goes heavy-tailed
+# near the response boundary: the median absolute score is under 0.5 while the
+# largest exceeds 18, so SD alone describes two dozen respondents rather than the
+# spread of the factor. Excluding them moves no domain estimate by as much as its
+# standard error on this file, which is the check the limitations section reports.
+map(fnames, function(fn) {
+  m = svymean(reformulate(fn), rep_des_s, na.rm = TRUE)
+  v = svyvar(reformulate(fn), rep_des_s, na.rm = TRUE)
+  tibble(Factor = fn,
+         Mean = round(as.numeric(coef(m)), 3),
+         SD = round(sqrt(as.numeric(coef(v))), 3),
+         IQR = round(IQR(scored[[fn]]), 3),
+         Extreme = sum(abs(scored[[fn]]) > 5))
+}) |>
+  list_rbind() |>
+  mutate(Label = factor_labels$Label,
+         Indicator = anchors[Factor],
+         Loading = round(map_dbl(Factor, function(fn) lam[anchors[[fn]], fn]), 2)) |>
+  select(Factor, Label, Mean, SD, IQR, Extreme, Indicator, Loading) |>
+  lca_table(align = "llrrrrlr", widths = fit_widths(8, first = 1.6),
             font_size = 8,
-            caption = glue("Factor positions across the {nrow(scored)} scored
-                           respondents."))
+            caption = glue("Factor positions across the {sum(scorable)} scored \\
+                            respondents, of {nrow(dat)} in the estimation frame. \\
+                            Mean and SD are design-weighted. Extreme counts \\
+                            respondents with a score beyond |5|."))
 ```
 
 # Domain estimation {#sec-domains}

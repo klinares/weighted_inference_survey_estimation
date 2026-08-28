@@ -703,11 +703,23 @@ wcor <- function(w, items, data) {
 efa_loadings <- function(f, salient = 0.40) {
   fit = as_fit(f)
   if(inherits(fit, "try-error")) return(NULL)
-  L = unclass(lavInspect(fit, "std")$lambda)
+  std = lavInspect(fit, "std")
+  L = unclass(std$lambda)
+  # fit_efa() rotates with geomin, which is oblique, so the factors correlate
+  #   and an item's communality is diag(L Phi L') rather than the sum of its
+  #   squared loadings. Summing the squares understates it by 2 r l1 l2 per
+  #   pair of factors: at a factor correlation of 0.5 and a 0.25 secondary
+  #   loading on a 0.55 primary that is 0.14, which is enough on its own to
+  #   push an item under the 0.30 line and have this table recommend dropping
+  #   an item that shares plenty with the battery. Phi is the standardised
+  #   factor covariance, which is their correlation matrix.
+  Phi = unclass(std$psi)
+  h2_item = diag(L %*% Phi %*% t(L))
   as_tibble(L, rownames = "item") |>
     pivot_longer(-item, names_to = "factor", values_to = "loading") |>
     group_by(item) |>
-    mutate(n_salient = sum(abs(loading) >= salient), h2 = sum(loading^2)) |>
+    mutate(n_salient = sum(abs(loading) >= salient),
+           h2 = h2_item[[dplyr::first(item)]]) |>
     ungroup() |>
     mutate(flag = case_when(n_salient == 0 ~ "loads nowhere",
                             n_salient > 1 ~ "cross-loads",
