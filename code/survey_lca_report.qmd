@@ -23,15 +23,29 @@ execute:
 
 ```{r setup}
 #| include: false
+# janitor, jsonlite and ellmer are called with :: further down and in
+# source_code.R, so they belong here: p_load installs what is missing, and a
+# namespaced call to an uninstalled package fails at the chunk that needs it
+# rather than at the top of the render.
 pacman::p_load(matrixStats, clue, survey, furrr, kableExtra, poLCA, here,
-               viridis, glue, sjlabelled, haven, knitr, tidyverse)
+               viridis, glue, sjlabelled, haven, knitr, janitor, jsonlite,
+               ellmer, tidyverse)
 source("source_code.R")
 source("survey_lca_config.R")
 init_parallel(cfg)
+
 # The enumeration below runs either way; everything from the chosen model on
 # waits until cfg$K_force is set.
 K_ready <- !is.null(cfg$K_force)
 K_star <- if (K_ready) as.integer(cfg$K_force) else NA_integer_
+
+# Which endpoint the drafted names in @sec-labeling came from, checked before
+# anything expensive runs, so a missing key fails in the first second of the
+# render rather than after the enumeration. The check is skipped while the
+# dimension is unset, because the labelling sections do not run on that pass and
+# a search render should not need a key.
+message(if (K_ready) llm_check(cfg) else
+          "Dimension unset: labelling does not run, endpoint not checked yet.")
 ```
 
 # Purpose and scope
@@ -135,7 +149,7 @@ The product over items is **local independence**: conditional on segment, items 
 
 $$d_K = (K-1) + K\sum_{j=1}^{J}(C_j - 1),$$
 
-one free parameter per prevalence beyond the last and $C_j-1$ free conditional probabilities per item per segment. the model dimension above is what the information criteria in @sec-selection penalise. This grows linearly in $K$ with slope $\sum_j(C_j-1)$, so batteries with many response categories become expensive quickly. The eleven items analysed here carry $\sum_j(C_j-1) = 15$, giving $d_K = 15K - 1$ and 59 free parameters at $K=4$. A thirteen-item seven-category battery, the one the factor arm analyses, would carry $\sum_j(C_j-1) = 78$ and 394 free parameters at $K=5$, which is why the choice of battery and the choice of model are not separable questions.
+one free parameter per prevalence beyond the last and $C_j-1$ free conditional probabilities per item per segment. the model dimension above is what the information criteria in @sec-selection penalise. This grows linearly in $K$ with slope $\sum_j(C_j-1)$, so batteries with many response categories become expensive quickly. The `r length(cfg$items)` items analysed here carry $\sum_j(C_j-1) =$ `r sum(cats - 1)`, giving `r df_k(4, cats)` free parameters at $K=4$. The factor arm's battery of seven-category items carries $\sum_j(C_j-1) = 6J$: over the eleven items it analyses that is 66, and 334 free parameters at $K=5$, which is why the choice of battery and the choice of model are not separable questions. The counts for this battery are computed by `df_k()` rather than written into this sentence, so they cannot drift from the configuration; the figure for the other battery is quoted for eleven items and has to be revisited if that battery changes.
 
 # Design-weighted estimation
 
@@ -448,6 +462,10 @@ Segment naming is drafted by a language model under a fixed instrument and is a 
 
 The instrument comprises a persona and rule set directing interpretation strictly from the displayed conditional response probabilities and item wording, one isolated call per segment, an optional survey-context paragraph fenced to referent resolution only, and a collision-gated harmonization pass that may edit labels but never descriptions. Isolation is empirical: joint prompts, in which the model sees all segments at once and must assign names one-to-one, confused near-neighbor segments and allowed a single confusion to corrupt two labels.
 
+Two models carry the instrument, and the split follows from that isolation. Drafting is the **worker's**: one segment, one prompt, $K$ times, with nothing to reason across and a fixed shape of answer, which is what a small model does reliably and cheaply. Harmonization is the **editor's**, because the pass is defined by seeing every label at once, which is the one thing the drafting calls exist to prevent, and because the collision gate means it fires rarely enough that a larger model costs little over a render. `cfg$llm_model_worker` and `cfg$llm_model_editor` name them, one id per endpoint; an empty editor entry runs both roles on the worker and the setup chunk prints that it has fallen back. The freeze file records which model drafted each label and, when the pass ran, which one edited it, so a name can be attributed to the model that produced it rather than to the workflow in general.
+
+What decides whether the editor is called at all is a mechanical word-overlap test, and it is worth being clear about what that test can and cannot see. It normalises the labels, drops function words, strips suffixes crudely and compares word sets, which catches the collision that actually happens -- one label being another with the words reordered -- and does not catch a derivational pair such as *economic vulnerability* against *economically vulnerable*. It is a pre-filter, not a synonym detector. `cfg$label_harmonise` chooses the policy: `"on_collision"` runs the filter, `"always"` sends every drafted set to the editor once and does not depend on the filter being right. Because labels are frozen after the first render, `"always"` costs one extra call per output directory rather than one per render, which is the argument for it.
+
 Reproducibility rests on a freeze file rather than a sampling seed. When `segment_labels.csv` exists in the output directory it is used and validated against $K$; otherwise the model drafts once and writes it. Editing the file is how the analyst takes over naming, and deleting it triggers a redraft. A seed would make the draft reproducible only for a fixed model, endpoint, and package version; the file is reproducible unconditionally.
 
 Labels are drafts. Naming happens only after the diagnostics of @sec-diagnostics and the validation of @sec-validation have been read, and each label must be verified against its profile panel in @fig-profiles before it is quoted.
@@ -556,6 +574,20 @@ map(seq_len(K_star), function(k)
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
+The same comparison as one number. The ratio below is the spread of the segments' item-by-item deviations over the spread of their overall levels, with every item rescaled so that a binary and a four-category item contribute the same possible range; without that rescaling the ratio is an artifact of the response formats. Well under one says the segments differ mainly in how high they answer overall, which is a continuum, and a factor model would describe it in a fraction of the parameters. Near or above one says they reorder the items, which is structure no single factor can hold. It is evidence about which arm this battery calls for rather than a test, and it is read against the eigenvalue evidence in the factor report.
+
+```{r level-pattern}
+#| echo: false
+#| eval: !expr K_ready
+level_pattern_ratio(fit_w, cfg$items) |>
+  mutate(across(everything(), function(x) round(x, 3))) |>
+  lca_table(align = "rrr", widths = c("11em", "11em", "6em"),
+            col.names = c("SD of segment levels", "SD of item deviations", "Ratio"),
+            caption = "Level against pattern. Well under one is a continuum a
+            factor model would describe more cheaply; near or above one is
+            structure a single factor cannot hold.")
+```
+
 ```{r fig-profiles}
 #| echo: false
 #| eval: !expr K_ready
@@ -596,9 +628,13 @@ pred <- predict_segments(survey_dat_full, fit_w, cfg$items, cfg$min_items)
 survey_scored <- bind_cols(survey_dat_full, pred)
 post_cols <- paste0("post_segment", seq_len(K_star))
 
+# A demographic level whose last respondent went unscored has to go with them:
+# svyby returns no row for an empty level while count(.drop = FALSE) below
+# returns one, and the three estimator frames would stop lining up.
 scored <- survey_scored |>
   filter(!is.na(segment)) |>
-  mutate(segment = factor(segment, levels = seq_len(K_star)))
+  mutate(segment = factor(segment, levels = seq_len(K_star))) |>
+  drop_empty_levels(cfg$aux, "scored frame")
 
 design_s <- build_rep_design(scored, cfg)
 des_s <- design_s$des
@@ -764,10 +800,15 @@ domain_naive <- map(cfg$aux, function(v) {
   list_rbind() |>
   arrange(variable, segment, level)
 
-# the shift summaries below difference these row by row, so put all three in the
-# same order first
+# The shift summaries difference these against each other. Ordering them the
+# same way is not enough on its own: svyby returns nothing for a demographic
+# level with no cases while count(.drop = FALSE) returns a row for it, so a
+# positional difference can pair the wrong cells rather than fail. The frames are
+# joined by key below and the row counts are checked here, which turns that into
+# a halt.
 domain <- arrange(domain, variable, segment, level)
 domain_bch <- arrange(domain_bch, variable, segment, level)
+stopifnot(nrow(domain) == nrow(domain_naive), nrow(domain) == nrow(domain_bch))
 
 est_levels <- c("Unweighted", "Design-based", "BCH")
 
@@ -779,7 +820,12 @@ domain_both <- bind_rows(mutate(domain_naive, estimator = "Unweighted"),
 # Cells at an observed 0 or 1 have a zero binomial standard error, so the
 # ratio there is 0/0. Those cells say nothing about the clustering cost and
 # are excluded from the median rather than allowed to poison it.
-se_ratio <- domain$se / domain_naive$se
+se_ratio <- domain |>
+  select(variable, level, segment, se) |>
+  inner_join(select(domain_naive, variable, level, segment, se_naive = se),
+             by = c("variable", "level", "segment")) |>
+  transmute(ratio = se / se_naive) |>
+  pull(ratio)
 
 cat(sprintf(paste0("Weighting moves the point estimates by a median of %.4f; 
                    the BCH\n",
@@ -802,7 +848,7 @@ cat(sprintf(paste0("Weighting moves the point estimates by a median of %.4f;
 
 Before anything is sent, R tests every pair of levels within each segment: a design-based Wald test on the difference, using the replicate covariance between the two estimates, Holm-adjusted across the pairs within the demographic. The model is handed the list of pairs that resolve and told to name only those. The tests run on the design-based estimator deliberately, since its attenuation means a difference resolved there separates despite the classification error, and the corrected columns can only widen it.
 
-```{r}
+```{r step1-propagation}
 #| eval: !expr K_ready
 # The BCH intervals above hold the step-one measurement model fixed. This
 # refits the model inside every replicate and lets the replicate's own
@@ -940,7 +986,7 @@ walk(cfg$aux, function(v) {
 
 The tables above carry one row per segment for every demographic, and most of the cells say nothing. Finding the two or three that do is the analyst's problem, and this section drafts that reading with a language model.
 
-The division of labour is the point. Before anything is sent, R works out which pairs of levels have intervals that do not overlap, and the model is handed that list and told to name only those. It never sees a standard error and never decides for itself whether a difference is real. Its rules forbid ranking levels whose intervals overlap, forbid causal language, require silence on any level flagged as too small to characterise, and cap the output at four findings, because the point is to say where to look rather than to narrate every cell.
+The division of labour is the point. Before anything is sent, R works out which pairs of levels the design-based test resolves, and the model is handed that list and told to name only those. It never sees a standard error and never decides for itself whether a difference is real. This step goes to the editor rather than the worker: the arithmetic is settled before the call, but choosing which two or three of twenty-odd cells to point an analyst at still means holding every level of the demographic in view at once, and it is one call per demographic rather than one per segment. Its rules forbid ranking levels whose intervals overlap, forbid causal language, require silence on any level flagged as too small to characterise, and cap the output at four findings, because the point is to say where to look rather than to narrate every cell.
 
 The prompt below is the real one, printed verbatim for the first demographic.
 
@@ -960,7 +1006,7 @@ cat(wrap_text(prompt_domain_read(domain_both, marginals, cfg$aux[1],
 #| eval: !expr K_ready
 domain_reads <- map(cfg$aux, function(v) {
   obj <- parse_json_block(
-    lca_chat(cfg)$chat(prompt_domain_read(domain_both, marginals, v,
+    llm_chat(cfg, role = "editor")$chat(prompt_domain_read(domain_both, marginals, v,
                                           wald = wald_dsg,
                                           labels = segment_labels$Label,
                                           context = cfg$survey_context),
@@ -1028,7 +1074,7 @@ The pseudo-likelihood can be multimodal with near-tied optima. The reported solu
 
 The measurement model is fit on item-complete cases while scoring and domain estimation extend to partially observed respondents. Respondents scored from fewer items carry more classification error, which is the correlated-error case flagged in @sec-tse: a processing error whose magnitude depends on an item nonresponse error.
 
-Domain estimates are reported both uncorrected and BCH-corrected. The uncorrected version uses hard modal assignment and understates differences between demographic levels, so a difference that appears there is real while a null is not evidence of no association. The corrected version removes that attenuation but conditions on the fitted measurement model: step-one parameter uncertainty is not propagated in the reported intervals. This is standard three-step practice, and the sensitivity refit above shows what it costs. Rebuilding the measurement model inside every replicate multiplies the BCH standard errors for `age_cat` by a median of 2.17 and by as much as 4.22, which is consistent with a weighted relative entropy of 0.71 rather than the high-separation regime in which fixed step one is usually defended [@bakk2014]. The reported BCH intervals should therefore be read as optimistic by roughly a factor of two, and any separation that would not survive intervals of that width should not be quoted as a finding.
+Domain estimates are reported both uncorrected and BCH-corrected. The uncorrected version uses hard modal assignment and understates differences between demographic levels, so a difference that appears there is real while a null is not evidence of no association. The corrected version removes that attenuation but conditions on the fitted measurement model: step-one parameter uncertainty is not propagated in the reported intervals. This is standard three-step practice, and the sensitivity refit above shows what it costs. Rebuilding the measurement model inside every replicate multiplies the BCH standard errors for `r if (K_ready) cfg$aux[1] else "the first demographic"` by a median of `r if (K_ready) round(median(s1_tbl$ratio, na.rm = TRUE), 2) else "(pending K)"` and by as much as `r if (K_ready) round(max(s1_tbl$ratio, na.rm = TRUE), 2) else "(pending K)"`, against a weighted relative entropy of `r if (K_ready) round(entropy_R2(post_w, w_vec, K_star), 2) else "(pending K)"` rather than the high-separation regime in which fixed step one is usually defended [@bakk2014]. Read the reported BCH intervals as optimistic by that median factor, and do not quote a separation that would not survive intervals of that width. These figures are computed by the sensitivity chunk above and are not carried over from an earlier render.
 
 Bivariate residuals and the indicator screen are rankings without reference distributions. They order item pairs and items by how poorly the model accounts for them and support no test.
 

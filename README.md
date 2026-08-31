@@ -15,7 +15,7 @@ Which one a battery calls for is a property of the data, and the workflow report
 
 Fitting a latent variable model to survey data is not the hard part. Reporting honest uncertainty is. Design-weighted point estimation is available in several packages. Standard errors that respect stratification and clustering, carried without interruption from the measurement model through to domain estimates and the corrections applied to them, are not available jointly in R.
 
-The gap is not academic. In the demonstration data a loading's design-based standard error is roughly twice what `lavaan` reports by default, and a domain estimate's is roughly twice the naive one. An analyst using the defaults would call differences significant that the data cannot support.
+The gap is not academic, and it is not assumed either: both reports print the ratio of the design-based standard error to the one the default machinery gives, parameter by parameter and cell by cell. Where that ratio is well above one, an analyst using the defaults would be calling differences significant that the data cannot support. Where it is near one, as it is for the factor arm's domain means on the demonstration file, the replicate design is what established that rather than something anyone was entitled to assume.
 
 Two design choices follow from that.
 
@@ -33,14 +33,14 @@ Naming happens after the diagnostics and before scoring, because a model that fa
 
 ## Repository layout
 
-Six files. Two are edited per dataset, one is never edited.
+Six files. Three are edited per dataset, one is never edited.
 
 ```         
-survey_data_read.R      the file path, design columns, demographic recodes   shared
-source_code.R           the engine: EM, WLSMV, replicate variance, prompts   shared
-survey_lca_config.R     items and settings for the class arm
+survey_data_read.R      the file path, design columns, demographic recodes   per dataset
+source_code.R           the engine: EM, WLSMV, replicate variance, prompts   never edited
+survey_lca_config.R     items and settings for the class arm                 per dataset
 survey_lca_report.qmd   the class analysis
-survey_cfa_config.R     items and settings for the factor arm
+survey_cfa_config.R     items and settings for the factor arm                per dataset
 survey_cfa_report.qmd   the factor analysis
 ```
 
@@ -54,24 +54,58 @@ Render with the dimension unset. Both reports run their search and stop with a n
 
 |   | Class arm | Factor arm |
 |------------------------|------------------------|------------------------|
-| Search evidence | BIC, entropy across K | eigenvalues with intervals, EFA fit, structure stability |
+| Search evidence | BIC, entropy across K | eigenvalues with replicate intervals against a random-data threshold, EFA fit and admissibility |
 | Diagnostics | item discrimination, bivariate residuals | loadings, modification indices |
 | Scoring | posterior over answered items | Bartlett factor scores |
 | Domain estimate | share of a group in each segment | mean position of each group |
 
 Both arms report the same three estimators for every domain quantity: naive, design-based, and corrected for the attenuation the assignment step introduces. The first gap is what ignoring the design costs. The second is what the assignment costs.
 
-Both score more respondents than they estimated on. Item nonresponse is not random, so restricting domain estimates to complete responders selects on the composition being measured.
+The class arm scores more respondents than it estimated on: local independence lets a missing answer drop out of the product, so a partial responder still receives a posterior. The factor arm cannot. `WLSMV` estimates on item-complete cases and `lavPredict` returns a score for those cases only, so its scored frame equals its estimation frame. Item nonresponse is not random, so where it is substantial this is a real advantage of the class arm rather than a detail.
 
 ## Choosing between the arms
 
-The question is whether people differ in *how much* or in *which*. The workflow answers it with a level-to-pattern ratio: how much the segments differ in overall level, against how much they differ in which items they favour, with every item rescaled so that a binary and a four-category item contribute equally.
+The question is whether people differ in *how much* or in *which*, and each arm prints the evidence for its own battery. The class report prints a level-to-pattern ratio: how far the segments differ in overall level, against how far they differ in which items they favour, with every item rescaled so that a binary and a four-category item contribute the same possible range. Well under one is a continuum a factor model would describe in far fewer parameters; near or above one is structure no single factor can hold. The factor report prints design-weighted eigenvalues with replicate intervals against a random-data threshold at the effective sample size.
 
-On the demonstration survey the same diagnostic separates two batteries cleanly. Thirteen institutional trust items, all one format asking one kind of question about different objects, return 0.55 and a first eigenvalue six times the second: one continuum, which the factor arm describes with a fraction of the parameters. Twelve economic vulnerability items of mixed format across unrelated domains return 3.43: a household can own a computer and still have run short of food, and no single continuum holds that.
+The two batteries in the demonstration are chosen to make the contrast: an institutional trust battery of one format asking one kind of question about different objects, and an economic vulnerability battery of mixed formats spanning unrelated domains, where a household can own a computer and still have run short of food. Neither report chooses the arm, and neither ratio is quoted here, because both are properties of the file in front of you and both are printed on every render.
+
+## The language model endpoint
+
+One line in each config decides where the drafting calls go.
+
+``` r
+llm_provider     = "openrouter",                       # or "work"
+llm_model_worker = c(openrouter = "...", work = "..."),
+llm_model_editor = c(openrouter = "",    work = "..."),
+llm_base_url     = c(work = "https://your-gateway/v1"),
+label_harmonise  = "on_collision",                     # or "always"
+```
+
+`openrouter` calls `ellmer::chat_openrouter()`; `work` calls `ellmer::chat_openai_compatible()`, falling back to `ellmer::chat_openai(base_url=)` on an ellmer that predates it.
+
+Two roles, because the two kinds of call want different things.
+
+| Role | Calls | Sees | Model |
+|------------------|------------------|------------------|------------------|
+| worker | one per segment or factor | that latent variable only | small; the job is mechanical and repeated |
+| editor | harmonisation, and one domain reading per demographic | every label, or every level of a demographic | larger; both need the whole set in view |
+
+Isolation in the drafting step is deliberate -- a joint prompt lets one confusion corrupt two labels -- so the harmonisation pass exists precisely to do the thing drafting is built to prevent, and that is the call worth a larger model. An empty `llm_model_editor` entry runs both roles on the worker and the setup chunk says so on every render. Whether the editor is called at all is decided by `label_harmonise`: `"on_collision"` runs a mechanical word-overlap filter, which catches a reordered synonym and does not catch a derivational one; `"always"` skips the filter. Labels are frozen to a CSV after the first render, so `"always"` costs one extra editor call per output directory, not per render. Both freeze files record which model drafted and which, if any, edited. Keys are never written in the config or passed as arguments, so one cannot reach a saved object or a traceback. Each provider reads its own environment variable:
+
+```         
+OPENROUTER_API_KEY=<key>
+OPENAI_API_KEY=<key>
+```
+
+in `~/.Renviron`, one per line, **unquoted**. A quoted value keeps its quotes on some platforms, they travel into the `Authorization` header, and the endpoint answers 401 with nothing that says why; the workflow strips a stray pair rather than letting that happen. `llm_check(cfg)` runs in the setup chunk of both reports, halts there if the key for the configured provider is missing, and prints the provider, the model and the key's length -- never the key. The label freeze files record the provider and model that drafted them, so a name can be attributed to an endpoint.
+
+## Requirements
+
+R 4.1 or later, for the native pipe. `pacman::p_load()` at the top of each report installs what is missing. `recode_values()` in `survey_data_read.R` is dplyr 1.2.0 and later; on an older dplyr the file defines a strict fallback with the same two behaviours it depends on and says so in a message. The fallback is this project's code, not dplyr's, and has not been diffed against it -- read the recode audit.
 
 ## Reproducibility
 
-Starting values are drawn in the main session from a deterministic seed sequence and passed to the workers as data, so no worker touches the random number generator and results are identical under sequential and parallel plans and under any number of workers.
+Starting values are drawn in the main session from a deterministic seed sequence and passed to the workers as data, so no worker touches the random number generator and results are identical under sequential and parallel plans and under any number of workers. The one loop that must draw inside the workers, the parallel analysis in the factor arm, takes L'Ecuyer streams from the same seed instead, which reproduces under any plan for the same reason.
 
 For the names the language model drafts, the mechanism is a freeze file rather than a seed. When the label file exists it is used and validated; otherwise the model drafts once and writes it. Editing that file is how the analyst takes over naming; deleting it triggers a redraft. A seed would be reproducible only for a fixed model, endpoint and package version.
 
@@ -95,13 +129,15 @@ Names and readings never enter a computation. A wrong one is a presentation erro
 - The bootstrap likelihood ratio test is omitted: its resampling presumes independent observations.
 - Bivariate residuals are total variation distance between the observed and model-implied two-way table. Bounded in [0, 1], zero under exact local independence, and no division by a possibly empty expected cell. No reference distribution is valid here, so this ranks rather than tests.
 - Modification indices and factor-count fit indices are rankings, not tests. Both ignore clustering and are inflated by roughly the design effect.
-- Structure stability replaces a holdout split. Refitting on each replicate and counting how often the loading pattern reproduces answers the same question a holdout would, and costs no cases. That matters at the sample sizes this workflow targets.
+- The structure search and the confirmatory fit use the same data, and the factor report says so rather than pretending otherwise. The guard against reading noise as structure is the replicate interval on each eigenvalue, which costs no cases; it is weaker than an independent sample and is not offered as a substitute for one. Refitting the loading pattern inside every replicate would answer the stability question more directly and is not implemented.
 - Attenuation is corrected and reported, not assumed away. Modal assignment and shrunken factor scores both understate group differences, so a difference that survives is real while a null is not evidence of absence.
 - The delivered file carries posteriors and correction weights, not only the assignment. Cross-tabulating the assignment alone reintroduces exactly the attenuation the correction removes, and the variable label says so.
 
 ## What is checked automatically
 
-These halt the render rather than produce a wrong number: a response label unmatched by an explicit recode rule; a configured column absent from the data; a stratum containing a single primary sampling unit in the analysis frame; a mismatch between the number of estimated domain quantities and their metadata; a label file whose row count does not match the chosen dimension; and a factor specification naming an item that was dropped.
+These halt the render rather than produce a wrong number: a response label unmatched by an explicit recode rule; a configured column absent from the data, or present and entirely missing; a stratum containing a single primary sampling unit in the analysis frame; a mismatch between the number of estimated domain quantities and their metadata; a label file whose row count or factor names do not match the chosen dimension; a factor specification naming an item that was dropped; a language model endpoint whose key is not in the environment, which fails in the setup chunk rather than after the search; and, in the factor arm, a scored frame whose row count does not match the estimation frame.
+
+These are repaired rather than halted, with a message naming what changed: a demographic level left with no respondents in the analysis or scored frame is dropped, so `svyby` and the tabulations cannot silently disagree about how many levels there are; and an API key written into `.Renviron` with quotes around it has them stripped before the request is signed.
 
 ## What the analyst must check
 

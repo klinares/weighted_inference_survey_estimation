@@ -23,8 +23,13 @@ execute:
 
 ```{r setup}
 #| include: false
+# janitor, jsonlite and ellmer are called with :: further down and in
+# source_code.R, so they belong here: p_load installs what is missing, and a
+# namespaced call to an uninstalled package fails at the chunk that needs it
+# rather than at the top of the render.
 pacman::p_load(lavaan, matrixStats, clue, survey, furrr, kableExtra,
-               viridis, here, glue, sjlabelled, haven, knitr, tidyverse)
+               viridis, here, glue, sjlabelled, haven, knitr, janitor,
+               jsonlite, ellmer, tidyverse)
 
 source("source_code.R")
 source("survey_cfa_config.R")
@@ -33,6 +38,14 @@ init_parallel(cfg)
 # The search sections below run either way; everything from the chosen model on
 # waits until cfg$n_factors is set.
 k_ready <- !is.null(cfg$n_factors)
+
+# Which endpoint the drafted names in @sec-labeling came from, checked before
+# anything expensive runs, so a missing key fails in the first second of the
+# render rather than after the search. The check is skipped while the dimension
+# is unset, because the labelling sections do not run on that pass and a search
+# render should not need a key.
+message(if (k_ready) llm_check(cfg) else
+          "Dimension unset: labelling does not run, endpoint not checked yet.")
 ```
 
 # Purpose and scope
@@ -49,7 +62,7 @@ Both models take the same battery of answers and look for something underneath t
 
 The practical question is whether people differ in *how much* or in *which*. If respondents mostly line up from those who answer low on everything to those who answer high on everything, a continuum describes them well and any classes you extract are cut points on it. If instead a substantial group trusts some institutions while distrusting others, and another group reverses that pattern, no single number can hold both and the class model is recovering structure a factor cannot.
 
-The factor model has two clear advantages when it applies. It estimates far fewer quantities, which matters a great deal at the sample sizes typical of a single-country survey: a five-class model on thirteen seven-category items carries several hundred free parameters, while a one-factor model on the same items carries under a hundred. And it treats the underlying trait as continuous, so it distinguishes between two people who both answer low without forcing them into the same bin.
+The factor model has two clear advantages when it applies. It estimates far fewer quantities, which matters a great deal at the sample sizes typical of a single-country survey: a five-class model on this battery of `r length(cfg$items)` seven-category items carries several hundred free parameters, while a one-factor model on the same items carries under a hundred. And it treats the underlying trait as continuous, so it distinguishes between two people who both answer low without forcing them into the same bin.
 
 Its disadvantage is communication. A class model reports a share of a group, and shares are what most readers already know how to read. A factor model reports a position on a scale with no natural units, which has to be translated before anyone outside the analysis can use it. @sec-scoring does that translation by converting positions back onto the original response scale, so a domain estimate reads as an expected answer rather than a standard deviation.
 
@@ -109,7 +122,7 @@ Three pieces of evidence, and they answer different questions.
 
 **Eigenvalues** say how much shared variance each successive factor accounts for. The conventional check is Horn's parallel analysis: simulate data with no factor structure at all, compute its eigenvalues, and retain factors whose real eigenvalue clears the simulated one. Two adjustments matter here. The simulation runs at an effective sample size that divides the achieved one by the design effect of the item means, because a clustered survey of 1,600 carries less information than 1,600 independent observations and the threshold would otherwise sit too low. And the simulated data are cut into the same response categories as the real items and read back with the same polychoric estimator, because polychoric correlations are noisier than ordinary ones and a threshold built from continuous random data would be too easy to clear. The eigenvalues also carry confidence intervals from the replicate design, which a bare scree plot cannot offer.
 
-**Admissibility** comes first, because it is a yes or no. A residual variance is the part of an item the factors do not explain, and it cannot be negative. When one comes out negative the solution is impossible rather than merely poor, and the usual cause is asking for more factors than the battery supports: one of them splits off and absorbs more than all of an item's variance. Such a solution is out regardless of how good its fit indices look, and the fit indices will look good, because an inadmissible solution is one that has fitted the sample too closely. Read `min_resid` beside the flag rather than trusting the flag alone: `lavaan` bounds residual variances at zero by default, so a Heywood case surfaces as a residual pinned near zero rather than as a negative one.
+**Admissibility** comes first, because it is a yes or no. A residual variance is the part of an item the factors do not explain, and it cannot be negative. When one comes out negative the solution is impossible rather than merely poor, and the usual cause is asking for more factors than the battery supports: one of them splits off and absorbs more than all of an item's variance. Such a solution is out regardless of how good its fit indices look, and the fit indices will look good, because an inadmissible solution is one that has fitted the sample too closely. Read `min_resid` beside the flag rather than trusting the flag alone. The search fits each rotated solution through `cfa()` with an EFA block, which leaves residual variances unbounded, so a Heywood case appears here as a negative number; `lavaan`'s `efa()` bounds them at zero instead and shows the same failure as a residual sitting suspiciously close to it. The block form is used because `efa()` treats every column of the data frame it is given as an indicator, and the sampling weight column that design-weighted estimation requires is one of those columns.
 
 **Fit indices** say how well each candidate reproduces the observed correlations. They will improve as factors are added, always, because more factors fit better. They are useful for spotting a model that fits badly and close to useless for choosing between models that all fit acceptably.
 
@@ -136,9 +149,14 @@ pa <- future_map(1:cfg$n_pa, function(i) {
     set_names(items) |>
     as_tibble()
   eigen(wcor(rep(1, nrow(D)), items, D), only.values = TRUE)$values
-}, .options = furrr_options(seed = NULL,
+}, .options = furrr_options(seed = TRUE,
      packages = c("lavaan", "dplyr", "purrr", "tibble"))) |>
   do.call(what = rbind)
+# seed = TRUE, not NULL: this is the one loop in either report that draws random
+# numbers inside the workers rather than being handed them, and under seed = NULL
+# the draws depend on the worker count, so the threshold moves between a
+# sequential and a parallel render. seed = TRUE takes L'Ecuyer streams from the
+# seed set above, which reproduces under any plan.
 
 eig_tbl <- tibble(factor = seq_along(items), eigenvalue = eig_hat,
                   se = sqrt(diag(replicate_variance(
@@ -196,7 +214,7 @@ efa_tbl |>
 
 ## Reading the loadings
 
-A loading table is the factor-analytic equivalent of the class report's response profiles: it is where the analyst decides whether a solution makes sense. Loadings below 0.40 are blanked so the pattern is visible. Three flags are worth acting on. An item that loads nowhere is not being measured by any factor. An item that loads on two is ambiguous and usually means the solution has been pushed too far. An item whose communality falls below 0.30 shares almost nothing with the rest of the battery regardless of how many factors are extracted, and is a candidate for `cfa_drop`. Communality here is $\operatorname{diag}(\Lambda\Phi\Lambda')$ rather than the sum of an item's squared loadings, because `geomin` rotates obliquely and the factors correlate. Summing the squares would understate a cross-loading item by $2r\lambda_1\lambda_2$ per pair of factors, which at a factor correlation of 0.5 is enough to put an item under the line that the battery in fact accounts for.
+A loading table is the factor-analytic equivalent of the class report's response profiles: it is where the analyst decides whether a solution makes sense. Loadings below 0.40 are blanked so the pattern is visible. Three flags are worth acting on. An item that loads nowhere is not being measured by any factor. An item that loads on two is ambiguous and usually means the solution has been pushed too far. An item whose communality falls below 0.30 shares almost nothing with the rest of the battery regardless of how many factors are extracted, and is a candidate for removal from `item_codes`. Communality here is $\operatorname{diag}(\Lambda\Phi\Lambda')$ rather than the sum of an item's squared loadings, because `geomin` rotates obliquely and the factors correlate. Summing the squares would understate a cross-loading item by $2r\lambda_1\lambda_2$ per pair of factors, which at a factor correlation of 0.5 is enough to put an item under the line that the battery in fact accounts for.
 
 ```{r loadings}
 #| echo: false
@@ -272,7 +290,7 @@ theta_cfa <- function(w_rep) {
   f <- try(fit_cfa(w_rep, items, dat, cfg$cfa_factors, cfg$cfa_free),
            silent = TRUE)
   if (inherits(f, "try-error") || !lavInspect(f, "converged"))
-    return(rep(NA_real_, length(par_names)))
+    return(set_names(rep(NA_real_, length(par_names)), par_names))
   coef(f)[par_names]
 }
 
@@ -496,6 +514,8 @@ A factor is a number with no name. The model has told us which items track a con
 
 The design principle is the one that governs every language-model step in this workflow: the model receives conclusions, never parameters. It sees each item's wording and its standardised loading, ordered so the strongest indicators come first. It does not see the covariance matrix, the estimator, or the fit indices, because it cannot do anything useful with them and their presence degrades the output.
 
+Two models carry it, as in the class report. Each factor is named in its own call by the **worker**, seeing only its own loadings, so one factor's name cannot be reasoned into place against another's. That isolation has a blind spot when a questionnaire section yields two related factors, which is exactly when two drafts come back as near-synonyms, so the same mechanical collision check runs afterwards and, only if it fires, one **editor** call edits the labels that overlap and nothing else. `cfg$llm_model_worker` and `cfg$llm_model_editor` name the two; an empty editor entry runs both roles on the worker. The domain readings in @sec-reading are the editor's for the same reason: they need every level of a demographic in view at once.
+
 One instruction is specific to factor analysis and worth stating. A loading tells you an item belongs to the factor; it does not tell you which end of the scale is high. That comes from the response wording, so the response scale is supplied separately and the model is asked to state the high end explicitly as part of its answer. Without it a model will confidently name a factor backwards.
 
 The prompt below is the real one, printed verbatim.
@@ -524,7 +544,7 @@ if (file.exists(lab_path)) {
 } else {
   factor_labels <- map(fnames, function(fn) {
     obj <- parse_json_block(
-      lca_chat(cfg, persona_cfa)$chat(
+      llm_chat(cfg, persona_cfa, role = "worker")$chat(
         prompt_factor_label(fit_w, dictionary, fn, scale_desc, cfg$survey_context),
         echo = FALSE))
     tibble(factor = fn,
@@ -533,6 +553,22 @@ if (file.exists(lab_path)) {
            High_end = pluck(obj, "high_end", .default = NA_character_))
   }) |>
     list_rbind()
+
+  # The same collision gate the class report uses, on the same instrument. Each
+  # factor was named without seeing the other, so two factors drawn from one
+  # questionnaire section can come back as near-synonyms with nothing in the
+  # drafting step able to notice. The gate is mechanical and the editing call
+  # happens only when it fires; descriptions are never touched.
+  collided <- harmonise_due(factor_labels$Label, cfg)
+  w <- llm_spec(cfg, "worker")
+  e <- llm_spec(cfg, "editor")
+
+  factor_labels <- factor_labels |>
+    mutate(Label_draft = Label) |>
+    harmonize_labels(cfg, unit = "FACTOR", persona = persona_cfa) |>
+    mutate(drafted_by = paste(w$provider, w$model),
+           harmonised_by = if (collided) paste(e$provider, e$model) else NA_character_,
+           drafted_on = as.character(Sys.Date()))
   write_csv(factor_labels, lab_path)
 }
 
@@ -558,7 +594,8 @@ if (length(missing_f) || length(extra_f))
 
 factor_labels <- factor_labels[match(fnames, factor_labels$factor), ]
 
-lca_table(factor_labels, widths = c("5em", "10em", "19em", "7em"),
+lca_table(select(factor_labels, factor, Label, Description, High_end),
+          widths = c("5em", "10em", "19em", "7em"),
           caption = "Factor names in use. Drafts: verify each against the
           loading table above before quoting it.")
 ```
@@ -585,13 +622,25 @@ FS <- lavPredict(fit_w, method = "Bartlett")
 FS_reg <- lavPredict(fit_w, method = "regression")
 fnames <- colnames(FS)
 
+# lavPredict returns one row per case lavaan actually used, and under WLSMV that
+# is the item-complete cases. With complete_cases TRUE in the config the two
+# frames coincide; with it FALSE they do not, and binding them column-wise would
+# either fail or, worse, recycle a shorter score vector against the frame and
+# attach every score to the wrong respondent.
+if (nrow(FS) != nrow(dat))
+  stop("lavPredict returned ", nrow(FS), " scores for ", nrow(dat),
+       " respondents. WLSMV scores item-complete cases only: set ",
+       "complete_cases <- TRUE in survey_cfa_config.R.", call. = FALSE)
+
 # Bartlett scores are unbounded and have no finite optimum for a small number of
 # near-floor response patterns, which come back NA; regression scores are bounded
 # by the prior and are always finite. Both arms must describe the same
 # respondents, or the contrast between them confounds shrinkage with sample
 # composition, which is the one thing this pair of designs exists to rule out.
-# The excluded cases are idiosyncratic patterns rather than the tails of the
-# factor: respondents at the floor on every item score without trouble.
+# What the unscored cases have in common is not recorded here and is worth
+# looking at when the count is more than a handful: the diagnostic in
+# @sec-tails measures the finite extreme scores, which are a different and
+# larger set, and finds them to be the floor and ceiling responders.
 scorable <- complete.cases(FS)
 
 if (!all(scorable)) {
@@ -605,8 +654,14 @@ if (mean(!scorable) > 0.02) {
        call. = FALSE)
 }
 
-scored     <- bind_cols(dat, as_tibble(FS))[scorable, ]
-scored_reg <- bind_cols(dat, as_tibble(FS_reg))[scorable, ]
+# Both frames lose the same respondents, and any demographic level those
+# respondents were the last of goes with them, so the levels are dropped here
+# too: svyby returns no row for an empty level while the theta function below
+# still builds one, and the two would stop lining up.
+scored     <- bind_cols(dat, as_tibble(FS))[scorable, ] |>
+  drop_empty_levels(cfg$aux, "scored frame")
+scored_reg <- bind_cols(dat, as_tibble(FS_reg))[scorable, ] |>
+  drop_empty_levels(cfg$aux, "regression-scored frame")
 
 design_s <- build_rep_design(scored, cfg)
 rep_des_s <- design_s$rep_des
@@ -625,10 +680,9 @@ names(anchors) <- fnames
 # Mean and SD are design-weighted; an unweighted mean here would be the one
 # quantity in the report describing the sample instead of the population.
 # IQR and Extreme sit beside SD because an unbounded estimator goes heavy-tailed
-# near the response boundary: the median absolute score is under 0.5 while the
-# largest exceeds 18, so SD alone describes two dozen respondents rather than the
-# spread of the factor. Excluding them moves no domain estimate by as much as its
-# standard error on this file, which is the check the limitations section reports.
+# near the response boundary, and SD alone would then describe a couple of dozen
+# respondents rather than the spread of the factor. How far those respondents
+# move the domain estimates is computed in @sec-tails rather than asserted here.
 map(fnames, function(fn) {
   m = svymean(reformulate(fn), rep_des_s, na.rm = TRUE)
   v = svyvar(reformulate(fn), rep_des_s, na.rm = TRUE)
@@ -657,7 +711,7 @@ The design is rebuilt on the scored frame and the mean factor position is estima
 
 ### What the design does to these intervals, and why the check matters either way
 
-The tables below report each mean factor position with an unweighted and a design-based standard error side by side, and here the two sit close together: the design-based intervals are a median of five percent wider than the naive ones, reaching about twenty percent in the thinnest cells. The released weights are nearly constant, so weighting moves almost nothing, and a mean factor position within a demographic level averages over most of the eighty-four sampling points, which caps how much the clustering can inflate its variance. The summary line above the tables reports the median ratio exactly.
+The tables below report each mean factor position with an unweighted and a design-based standard error side by side, and the summary line printed with them gives the median ratio of the two for this file. Two features of this survey hold that ratio down: the released weights are nearly constant, so weighting moves almost nothing, and a mean factor position within a demographic level averages over most of the sampling points, which caps how much the clustering can inflate its variance. Neither feature is a property of the method, so the ratio is read off the printed line on every file rather than carried over from this one.
 
 The point of computing the design-based interval is that nothing short of computing it tells you this. The naive interval answers a different question: what the uncertainty would be if these respondents had been drawn one at a time, independently, from the whole country. They were drawn in clusters of about nineteen, and people in the same neighbourhood answer alike. When an estimate concentrates within few clusters, or when the weights vary, the naive interval understates the uncertainty and its nominal 95 percent coverage fails, so an analyst using it calls differences significant that the data cannot support. The class report's battery and the production data with informative weights are exactly the settings where that gap opens. That the gap is small here is something the replicate design demonstrated rather than something anyone was entitled to assume.
 
@@ -691,16 +745,31 @@ dom_one <- function(frame, des, cr, est) {
           summarise(p = mean(.data[[factor]]),
                     se = sd(.data[[factor]]) / sqrt(n()), .groups = "drop")
       } else {
-        sb = as.data.frame(svyby(reformulate(factor), reformulate(variable),
-                                 des, svymean, na.rm = TRUE))
-        d = tibble(level = as.character(sb[[1]]), p = sb[[2]], se = sb[[3]])
+        # coef() and SE() rather than columns 2 and 3. svyby's column layout
+        # varies with the statistic and the vartype, and a positional read is
+        # wrong silently rather than loudly: it returns a number of the right
+        # shape from the wrong column.
+        sb = svyby(reformulate(factor), reformulate(variable), des, svymean,
+                   na.rm = TRUE)
+        d = tibble(level = as.character(sb[[variable]]),
+                   p = as.numeric(coef(sb)), se = as.numeric(SE(sb)))
       }
       a = anchors[[factor]]
       mutate(d, variable = variable, factor = factor,
              segment = match(factor, fnames), estimator = est,
-             expected = mean(as.numeric(dat[[a]]), na.rm = TRUE) +
-               p * lam[a, factor] * sd(as.numeric(dat[[a]]), na.rm = TRUE),
-             lo = p - cr * se, hi = p + cr * se)
+             lo = p - cr * se, hi = p + cr * se,
+             # The translation is linear in p, so the interval travels through
+             # it unchanged in shape. Reporting the point alone invites a reader
+             # to treat a ladder position estimated from a dozen respondents as
+             # if it were read off the questionnaire. A negative loading flips
+             # the ends, so they are sorted rather than assumed.
+             .m = mean(as.numeric(dat[[a]]), na.rm = TRUE),
+             .s = sd(as.numeric(dat[[a]]), na.rm = TRUE),
+             expected = .m + p * lam[a, factor] * .s,
+             .e1 = .m + lo * lam[a, factor] * .s,
+             .e2 = .m + hi * lam[a, factor] * .s,
+             expected_lo = pmin(.e1, .e2), expected_hi = pmax(.e1, .e2)) |>
+        select(-.m, -.s, -.e1, -.e2)
     }) |>
     list_rbind()
 }
@@ -796,13 +865,15 @@ walk(cfg$aux, function(v) {
   d |>
     filter(estimator == "Bartlett") |>
     transmute(Factor = factor_labels$Label[segment], Level = level,
-              cell = sprintf("%.2f", expected)) |>
+              cell = sprintf("%.2f [%.2f, %.2f]", expected, expected_lo,
+                             expected_hi)) |>
     pivot_wider(names_from = Level, values_from = cell) |>
     lca_table(align = str_c("l", strrep("r", length(lv))),
-              widths = fit_widths(1 + length(lv), first = 2.2), font_size = 7,
+              widths = fit_widths(1 + length(lv), first = 1.6), font_size = 7,
               label = paste0("exp-", str_replace_all(v, "_", "-")),
               caption = glue("The same positions as an expected answer on each ",
-                             "factor's strongest indicator.")) |>
+                             "factor's strongest indicator, with the interval ",
+                             "carried through the linearisation.")) |>
     cat(sep = "\n")
   cat("\n\n")
 
@@ -823,6 +894,94 @@ walk(cfg$aux, function(v) {
   print(p)
   cat("\n\n{{< pagebreak >}}\n\n")
 })
+```
+
+## What the extreme scores are doing {#sec-tails}
+
+The Bartlett column is wider than the design-based one by construction, and that much is the trade @sec-scoring describes. How much wider is not a constant, and that is the thing to check rather than assume. Under shrinkage alone the ratio of the two standard errors would be one number, roughly the reciprocal of the factor's reliability, in every cell of every demographic. A ratio that varies cell by cell is a different mechanism: a few respondents with very large scores, and cells that differ in how many of them they contain.
+
+Where those respondents come from is not mysterious. For ordinal indicators the maximum likelihood position of a respondent who answered at one end of nearly every item has no bounded optimum, so the estimate runs out to the tail rather than settling. The table below counts how many items each group answered at the floor or the ceiling of its observed range; if the extreme scorers sit far above everyone else on that count, the tail is a boundary artefact rather than a set of genuinely extreme respondents.
+
+The sensitivity is reported the same way a design effect is: as a ratio and a shift in units of the estimate's own standard error. Nothing is trimmed from the analysis. A respondent who answered at the floor of every item is a real respondent and the estimand includes them; the point of removing them here is to find out how much of the Bartlett column they account for, which is a question about the estimator rather than about the population.
+
+```{r tails}
+#| echo: false
+#| eval: !expr k_ready
+edge_counts <- dat |>
+  select(all_of(items)) |>
+  mutate(across(everything(),
+                function(x) as.integer(x == min(x, na.rm = TRUE) |
+                                       x == max(x, na.rm = TRUE)))) |>
+  rowSums(na.rm = TRUE)
+edge_scored <- edge_counts[scorable]
+
+map(fnames, function(f) {
+  b <- scored[[f]]
+  big <- abs(b) > 5
+  tibble(Factor = factor_labels$Label[match(f, fnames)],
+         SD = sd(b), IQR = IQR(b),
+         `SD vs normal` = sd(b) / (IQR(b) / 1.349),
+         `n over 5` = sum(big), `largest score` = max(abs(b)),
+         `items at an edge, extreme` = if (any(big)) mean(edge_scored[big]) else NA_real_,
+         `items at an edge, rest` = mean(edge_scored[!big]))
+}) |>
+  list_rbind() |>
+  mutate(across(where(is.double), function(x) round(x, 2))) |>
+  lca_table(align = "lrrrrrrr", widths = fit_widths(8, first = 1.8), font_size = 7,
+            caption = glue("Shape of the Bartlett score distribution. SD equals
+                            IQR / 1.349 for a normal, so a ratio well above one
+                            says the spread is in the tails. The last two columns
+                            count items answered at the floor or ceiling of their
+                            observed range, out of {length(items)}."))
+
+# svyby read through coef() and SE(), for the reason given in the domains chunk.
+svyby_tbl <- function(f, v, des) {
+  sb <- svyby(reformulate(f), reformulate(v), des, svymean, na.rm = TRUE)
+  tibble(level = as.character(sb[[v]]), est = as.numeric(coef(sb)),
+         se = as.numeric(SE(sb)))
+}
+
+# Trimming can leave a stratum with one PSU, which build_rep_design() treats as
+# a hard stop. That is the check working: the comparison is then unavailable
+# rather than computed on a design that cannot estimate its own variance.
+tail_sens <- map(fnames, function(f) {
+  keep <- abs(scored[[f]]) <= 5
+  des_trim <- try(build_rep_design(scored[keep, ], cfg)$rep_des, silent = TRUE)
+  if (inherits(des_trim, "try-error")) return(NULL)
+  map(cfg$aux, function(v) {
+    svyby_tbl(f, v, rep_des_s) |>
+      rename(est_full = est, se_full = se) |>
+      left_join(rename(svyby_tbl(f, v, des_trim), est_trim = est, se_trim = se),
+                by = "level") |>
+      mutate(Factor = f, Variable = v, shift_in_se = abs(est_full - est_trim) / se_full,
+             se_ratio = se_full / se_trim, dropped = sum(!keep))
+  }) |>
+    list_rbind()
+}) |>
+  list_rbind()
+
+if (is.null(tail_sens) || nrow(tail_sens) == 0) {
+  cat("Trimming the extreme scores leaves a stratum with a single PSU, so the",
+      "comparison is unavailable on this file.\n")
+} else {
+  tail_sens |>
+    slice_max(shift_in_se, n = 6) |>
+    transmute(Factor = factor_labels$Label[match(Factor, fnames)],
+              Variable, Level = level,
+              `Bartlett` = sprintf("%+.3f (%.3f)", est_full, se_full),
+              `Extremes removed` = sprintf("%+.3f (%.3f)", est_trim, se_trim),
+              `Shift in SE` = sprintf("%.2f", shift_in_se),
+              `SE ratio` = sprintf("%.2f", se_ratio)) |>
+    lca_table(align = "lllrrrr", widths = fit_widths(7, first = 1.8), font_size = 7,
+              caption = glue("The six cells the extreme scores move most, of ",
+                             "{nrow(tail_sens)}, after removing the ",
+                             "{paste(unique(tail_sens$dropped), collapse = ' and ')} ",
+                             "respondents beyond |5| on each factor. A shift ",
+                             "approaching or above one standard error means that ",
+                             "cell's Bartlett estimate is partly the estimator ",
+                             "reaching the response boundary rather than the ",
+                             "group differing."))
+}
 ```
 
 # Reading the domain table {#sec-reading}
@@ -852,7 +1011,7 @@ cat(wrap_text(prompt_domain_read(
 #| eval: !expr k_ready
 domain_reads <- map(cfg$aux, function(v) {
   obj <- parse_json_block(
-    lca_chat(cfg, persona_cfa)$chat(
+    llm_chat(cfg, persona_cfa, role = "editor")$chat(
       prompt_domain_read(
         domain, marginals, v, labels = factor_labels$Label,
         context = cfg$survey_context,
@@ -896,7 +1055,7 @@ glue("Wrote survey_with_factor.sav, three CSVs, and cfa_fit.rds to",
 
 The two reports use different batteries by design, so there is no shared item table to build and no fit contest to run. A `WLSMV` factor model is fitted to a correlation matrix while a latent class model is fitted to the response-pattern likelihood; their information criteria are on different scales and putting them side by side would be wrong.
 
-What the pair demonstrates is the choice itself. This battery is thirteen items of one format asking one kind of question about different objects, and its first eigenvalue dwarfs the second: one continuum, which a factor model represents in a fraction of the parameters a class model would need. The class report's battery is eleven items of mixed format spanning unrelated domains, where a household can own a computer and still have run short of food, and no single continuum holds that. Reading the two search sections against each other is the argument for when each model applies, and it is made by the data rather than asserted.
+What the pair demonstrates is the choice itself. This battery is `r length(cfg$items)` items of one format asking one kind of question about different objects, and its first eigenvalue dwarfs the second: one continuum, which a factor model represents in a fraction of the parameters a class model would need. The class report's battery is of mixed format spanning unrelated domains, where a household can own a computer and still have run short of food, and no single continuum holds that. Reading the two search sections against each other is the argument for when each model applies, and it is made by the data rather than asserted.
 
 # Limitations
 

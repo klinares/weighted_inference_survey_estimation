@@ -319,6 +319,49 @@ bvr_pairs <- function(df, w, items, fit) {
 # Both arms use this, which is the point: one design, every standard error.
 #______________________________________________________________________________
 
+# The configuration names the columns everything downstream reads by position in
+#   a formula, and a name that is not there fails late and unhelpfully: svydesign
+#   reports a missing object, or a demographic arrives as an all-NA column and
+#   every domain estimate built on it is empty. Checked once, by name, before
+#   any of that.
+check_config_columns <- function(dat, cfg) {
+  need = c(cfg$strata, cfg$psu, cfg$weight, cfg$id, cfg$items, cfg$aux)
+  gone = setdiff(need, names(dat))
+  if(length(gone))
+    stop("The configuration names columns the data does not have: ",
+         paste(gone, collapse = ", "),
+         ". Check item_codes and demo_codes against the source file.",
+         call. = FALSE)
+  empty = keep(c(cfg$items, cfg$aux), function(v) all(is.na(dat[[v]])))
+  if(length(empty))
+    stop("These configured columns are entirely missing values: ",
+         paste(empty, collapse = ", "),
+         ". A recode arm or a nonresponse code has emptied them.", call. = FALSE)
+  invisible(TRUE)
+}
+
+# A demographic level with no rows left in the analysis frame is a live hazard
+#   rather than a cosmetic one. svyby returns no row for it while
+#   count(.drop = FALSE) returns one, so the estimator frames stop lining up and
+#   a positional comparison between them silently pairs the wrong cells; and the
+#   domain theta function divides by a zero weight total, which puts NaN into the
+#   replicate covariance and drops the level out of the Wald tests without
+#   saying so. Dropping empty levels once, and naming them, keeps every frame
+#   the same shape.
+drop_empty_levels <- function(dat, aux, label = "analysis frame") {
+  gone = map(set_names(aux), function(v) {
+    if(!is.factor(dat[[v]])) return(character(0))
+    setdiff(levels(dat[[v]]), levels(droplevels(dat[[v]])))
+  }) |>
+    keep(function(x) length(x) > 0)
+  if(length(gone))
+    message("Dropped empty levels from the ", label, ": ",
+            paste(imap_chr(gone, function(lv, v)
+              paste0(v, " (", paste(lv, collapse = ", "), ")")), collapse = "; "))
+  mutate(dat, across(all_of(aux),
+                     function(x) if(is.factor(x)) droplevels(x) else x))
+}
+
 # Stratified jackknife design. 
 # Singleton strata are a hard stop: they cannot take the n_h / (n_h - 1) 
 #   replicate scaling, and survey.lonely.psu governs linearization rather 
@@ -364,7 +407,13 @@ bch_weights <- function(post, modal, w) {
   K = ncol(post)
   num = crossprod(w * post, outer(modal, seq_len(K), `==`) + 0)
   D = sweep(num, 1, rowSums(num), "/")
-  solve(D)[modal, , drop = FALSE]
+  Dinv = try(solve(D), silent = TRUE)
+  if(inherits(Dinv, "try-error"))
+    stop("The classification table D is singular, so the BCH correction has no ",
+         "inverse to apply. This happens when a segment takes no modal ",
+         "assignments in a replicate, which is a sign the segment is too small ",
+         "to survive deleting one PSU.", call. = FALSE)
+  Dinv[modal, , drop = FALSE]
 }
 
 
@@ -456,7 +505,6 @@ rules_domain <- paste(
   "RULES:",
   "1. Describe a difference only where it appears in the list above. For any",
   "   pair not listed, say the data do not separate the groups.",
-  "   overlap. Where they overlap, say the data do not separate the groups.",
   "2. Do not rank levels whose intervals overlap.",
   "3. Never use causal language. Groups differ in composition; being in a",
   "   group does not cause membership.",
@@ -503,17 +551,185 @@ prompt_segment_label <- function(fit, k, dictionary, items, context = NULL) {
     'JSON (one object): {{"label": "...", "description": "..."}}')
 }
 
-lca_chat <- function(cfg, persona = persona_lca) {
-  p = ellmer::params(temperature = 0, seed = cfg$seed)
-  if (is.null(cfg$compass_base_url)) {
-    ellmer::chat_openrouter(model = cfg$llm_model,
-                            system_prompt = persona, params = p)
-  } else {
-    if (!nzchar(Sys.getenv("OPENAI_API_KEY")))
-      Sys.setenv(OPENAI_API_KEY = Sys.getenv("COMPASS_API_KEY"))
-    ellmer::chat_openai(base_url = cfg$compass_base_url, model = cfg$llm_model,
-                        system_prompt = persona, params = p)
+# ---- Endpoint ---------------------------------------------------------------
+# One word in the method config decides where the drafting call goes, because
+#   the two arms run in different places: OpenRouter outside work, an
+#   OpenAI-compatible gateway inside it.
+#
+#   cfg$llm_provider   "openrouter" or "work"
+#   cfg$llm_model      named vector, one model id per provider
+#   cfg$llm_base_url   named vector, the work gateway's URL. Unused on openrouter
+#
+# Keys are read from the environment and never passed as arguments, so a key
+#   cannot reach a saved fit object, a traceback, or the rendered report:
+#
+#   openrouter -> OPENROUTER_API_KEY
+#   work       -> OPENAI_API_KEY
+#
+# Write them one per line in ~/.Renviron, unquoted, no trailing spaces:
+#
+#   OPENAI_API_KEY=sk-...
+#
+# A quoted value keeps its quotes on some platforms, they travel into the
+#   Authorization header, and the endpoint answers 401 with nothing to say why.
+#   llm_key() strips a stray pair and writes the cleaned value back into the
+#   session, so ellmer reads what was meant rather than what was typed.
+
+llm_providers <- c("openrouter", "work")
+
+# Two roles, because the two kinds of call want different things. The worker
+#   drafts one label at a time and never sees another segment, which is a small
+#   mechanical job repeated K times. The editor is handed every label at once and
+#   asked to tell near neighbours apart, and it writes the domain readings, which
+#   are prose an analyst acts on; both need to hold the whole set in view, which
+#   is exactly what the drafting calls are built not to do. An empty editor entry
+#   falls back to the worker, so the workflow runs unchanged on one model and a
+#   second is opted into rather than required.
+llm_roles <- c("worker", "editor")
+
+# The key is never passed as an argument. ellmer's constructors read their own
+#   environment variable, so the whole of the handling here is: read it, clean
+#   it, and make sure the name ellmer reads holds the cleaned value. That is what
+#   keeps a key out of a saved object, a traceback, and a printed cfg.
+#
+# The name is ellmer's choice, not the config's -- chat_openrouter() reads
+#   OPENROUTER_API_KEY and the compatible endpoint reads OPENAI_API_KEY -- so
+#   cfg$llm_key_var says where the key actually lives on this machine when that
+#   is somewhere else, one OPENAI_API_KEY serving both endpoints being the case
+#   that matters. The value is read from that name and mirrored into the name
+#   ellmer reads, for this session only; nothing is written to disk and nothing
+#   is passed as an argument either way.
+llm_key_var_default <- function(provider)
+  c(openrouter = "OPENROUTER_API_KEY", work = "OPENAI_API_KEY")[[provider]]
+
+llm_key_var <- function(cfg, provider) {
+  v = llm_field(cfg$llm_key_var, provider)
+  if (is.na(v)) llm_key_var_default(provider) else v
+}
+
+llm_key <- function(cfg, provider) {
+  var = llm_key_var(cfg, provider)
+  ellmer_var = llm_key_var_default(provider)
+  raw = trimws(Sys.getenv(var, ""))
+  # A .Renviron entry written with quotes keeps them on some platforms; they
+  #   travel into the Authorization header and the endpoint answers 401 with
+  #   nothing that says why.
+  key = str_remove_all(raw, "^[\"']|[\"']$")
+  if (nzchar(key)) {
+    vars = unique(c(var, ellmer_var))
+    do.call(Sys.setenv, set_names(as.list(rep(key, length(vars))), vars))
   }
+  key
+}
+
+# One place that reads the endpoint fields, so the report, the preflight and the
+#   chat constructor cannot disagree about which endpoint is live.
+# A field that is absent, NULL, unnamed for this provider, or empty all mean the
+#   same thing here, and all of them have to answer is.na() rather than come back
+#   length zero, or the check below fails with R's error instead of this file's.
+llm_field <- function(v, nm) {
+  out = unname(v[nm])
+  if (length(out) != 1 || is.na(out) || !nzchar(out)) NA_character_ else out
+}
+
+llm_spec <- function(cfg, role = "worker") {
+  if (!role %in% llm_roles)
+    stop("role must be one of: ", paste(llm_roles, collapse = ", "), ".",
+         call. = FALSE)
+  provider = cfg$llm_provider %||% "openrouter"
+  if (!provider %in% llm_providers)
+    stop("cfg$llm_provider is '", provider, "'. It must be one of: ",
+         paste(llm_providers, collapse = ", "), ".", call. = FALSE)
+  worker = llm_field(cfg$llm_model_worker, provider)
+  if (is.na(worker))
+    stop("cfg$llm_model_worker has no entry named '", provider,
+         "'. Give one model id per provider, e.g. ",
+         'llm_model_worker = c(openrouter = "...", work = "...").', call. = FALSE)
+  editor = llm_field(cfg$llm_model_editor, provider)
+  fell_back = is.na(editor)
+  model = if (role == "worker") worker else if (fell_back) worker else editor
+  base_url = llm_field(cfg$llm_base_url, provider)
+  if (provider == "work" && is.na(base_url))
+    stop("cfg$llm_base_url has no entry named 'work'. An OpenAI-compatible ",
+         "endpoint has no default URL; set the gateway's base URL, ending in ",
+         "/v1, in the config.", call. = FALSE)
+  list(provider = provider, role = role, model = model, base_url = base_url,
+       editor_fell_back = fell_back,
+       key_var = llm_key_var(cfg, provider),
+       ellmer_var = llm_key_var_default(provider),
+       key = llm_key(cfg, provider))
+}
+
+# chat_openai_compatible(base_url, name, system_prompt, api_key, credentials,
+#   model, params, api_args, api_headers, preserve_thinking, echo) is the current
+#   entry point for a gateway that speaks the OpenAI API. A locked-down library
+#   can still be on an ellmer that predates it, where chat_openai(base_url=)
+#   reaches the same endpoint; both read OPENAI_API_KEY, so the fallback changes
+#   the call and not the credentials.
+#
+# Neither api_key nor credentials is passed. api_key is deprecated in current
+#   ellmer, and the environment default is the one path that behaves identically
+#   on both constructors and on both versions. See llm_key() above for what is
+#   done to the environment instead.
+#
+# A corporate gateway often wants something extra on every request: a tenant id
+#   or an api-version header, or a body field the endpoint requires.
+#   cfg$llm_api_headers and cfg$llm_api_args pass those straight through, and are
+#   only sent when the installed ellmer has the argument, so setting one cannot
+#   turn into an unused-argument error on an older library.
+openai_compatible_chat <- function(cfg, base_url, model, system_prompt, params) {
+  fn = get0("chat_openai_compatible", asNamespace("ellmer"), mode = "function")
+  ctor = fn %||% ellmer::chat_openai
+  args = list(base_url = base_url, model = model,
+              system_prompt = system_prompt, params = params)
+  fml = names(formals(ctor))
+  if ("name" %in% fml)
+    args$name = cfg$llm_endpoint_name %||% "work gateway"
+  if ("api_args" %in% fml && length(cfg$llm_api_args))
+    args$api_args = cfg$llm_api_args
+  if ("api_headers" %in% fml && length(cfg$llm_api_headers))
+    args$api_headers = cfg$llm_api_headers
+  do.call(ctor, args)
+}
+
+llm_chat <- function(cfg, persona = persona_lca, role = "worker") {
+  s = llm_spec(cfg, role)
+  p = ellmer::params(temperature = 0, seed = cfg$seed)
+  if (s$provider == "openrouter")
+    ellmer::chat_openrouter(model = s$model, system_prompt = persona, params = p)
+  else
+    openai_compatible_chat(cfg, s$base_url, s$model, persona, p)
+}
+
+# Called once from the setup chunk. A missing key fails here, in the first
+#   second of the render, rather than after the enumeration has run; and the
+#   line it returns is the provenance of every drafted name below it. The key
+#   itself is never printed, only its length, which is enough to tell a real
+#   key from an empty string or a stray pair of quotes.
+llm_check <- function(cfg) {
+  if (!requireNamespace("ellmer", quietly = TRUE))
+    stop("Package 'ellmer' is not installed; the labelling sections cannot run.",
+         call. = FALSE)
+  w = llm_spec(cfg, "worker")
+  e = llm_spec(cfg, "editor")
+  if (!nzchar(w$key))
+    stop(w$key_var, " is empty, so provider '", w$provider, "' cannot be used.\n",
+         "Add it to ~/.Renviron, unquoted, and restart R:\n  ",
+         w$key_var, "=<key>\n",
+         "Or, if the key on this machine lives under another name, point the ",
+         "config at it:\n  llm_key_var = c(", w$provider, ' = "THAT_NAME")',
+         call. = FALSE)
+  str_glue("LLM endpoint: {w$provider}",
+           if (w$provider == "work") str_glue(" | {w$base_url}") else "",
+           " | key read from {w$key_var} ({nchar(w$key)} characters)",
+           if (!identical(w$key_var, w$ellmer_var))
+             str_glue(", mirrored into {w$ellmer_var} for ellmer") else "",
+           "\n",
+           "  worker (one call per segment or factor): {w$model}\n",
+           "  editor (harmonisation, domain readings): {e$model}",
+           if (e$editor_fell_back)
+             "  <- no cfg$llm_model_editor entry, falling back to the worker"
+           else "")
 }
 
 # Some models wrap valid JSON despite rule 4, so pull the object out by pattern.
@@ -526,8 +742,9 @@ parse_json_block <- function(txt, pattern = "(?s)\\{.*\\}") {
 label_segments_llm <- function(fit, dictionary, items, cfg) {
   map(seq_along(fit$pi), function(k) {
     obj = parse_json_block(
-      lca_chat(cfg)$chat(prompt_segment_label(fit, k, dictionary, items,
-                                              cfg$survey_context), echo = FALSE))
+      llm_chat(cfg, role = "worker")$chat(
+        prompt_segment_label(fit, k, dictionary, items, cfg$survey_context),
+        echo = FALSE))
     tibble(K = k,
            Label = pluck(obj, "label", .default = NA_character_),
            Description = pluck(obj, "description", .default = NA_character_))
@@ -539,20 +756,68 @@ label_segments_llm <- function(fit, dictionary, items, cfg) {
 #   label, since neither call saw the other. 
 # One closing call edits only the labels  that collide, and runs only when 
 #   this mechanical check fires.
-labels_collide <- function(labels) {
-  ws = map(str_squish(tolower(labels)), function(s) unique(strsplit(s, " ")[[1]]))
+# The collision that actually happens is a word-order synonym: "Institutional
+#   trust" against "Trust in institutions". Comparing raw word sets scores that
+#   pair 0.25 and lets it through, which is how a gate can look like a guard and
+#   never fire. Function words are dropped and a crude suffix strip stands in for
+#   a stemmer, which is enough to make those two sets equal without taking on a
+#   dependency. It is a mechanical pre-filter, not a synonym detector: a
+#   derivational pair such as "Economic vulnerability" against "Economically
+#   vulnerable" still slips past, and the analyst reading the labels is the
+#   check that catches it. Set label_harmonise = "always" in the config to stop
+#   relying on the filter at all.
+label_tokens <- function(x) {
+  stop_words = c("a", "an", "and", "in", "of", "on", "the", "to", "with", "for",
+                 "by", "or", "at", "from")
+  tolower(x) |>
+    str_replace_all("[^a-z ]", " ") |>
+    str_squish() |>
+    strsplit(" ") |>
+    map(function(w) {
+      w = setdiff(w, stop_words)
+      stem = str_remove(w, "(ness|ality|ities|ity|ally|al|ing|ers|er|ies|es|s|y)$")
+      w = if_else(nchar(stem) >= 4, stem, w)
+      unique(w[nzchar(w)])
+    })
+}
+
+labels_collide <- function(labels, cutoff = 0.5) {
+  # One label cannot collide with anything, and combn() has no pairs to form.
+  if (length(labels) < 2 || anyNA(labels)) return(FALSE)
+  ws = label_tokens(labels)
   pr = t(combn(length(labels), 2L))
   any(map_dbl(seq_len(nrow(pr)), function(i) {
     a = ws[[pr[i, 1]]]
     b = ws[[pr[i, 2]]]
+    if (!length(a) || !length(b)) return(0)
     length(intersect(a, b)) / length(union(a, b))
-  }) >= 0.5)
+  }) >= cutoff)
 }
 
-prompt_harmonize <- function(lab) {
-  rows = str_glue_data(lab, "SEGMENT {K}: LABEL \"{Label}\" | DESCRIPTION: {Description}")
+# Whether the editor call happens at all. The gate is a house convention and the
+#   config says which policy is in force, because "the larger model harmonises"
+#   and "the larger model is never called" differ only by whether this returns
+#   TRUE. Labels are frozen to a CSV after the first render, so "always" costs
+#   one extra editor call per output directory rather than one per render.
+harmonise_due <- function(labels, cfg) {
+  policy = cfg$label_harmonise %||% "on_collision"
+  if (!policy %in% c("on_collision", "always"))
+    stop('cfg$label_harmonise is "', policy,
+         '". It must be "on_collision" or "always".', call. = FALSE)
+  if (length(labels) < 2 || anyNA(labels)) return(FALSE)
+  policy == "always" ||
+    labels_collide(labels, cfg$label_collision_cutoff %||% 0.5)
+}
+
+# unit is the word the arm uses for its latent variable, so the factor report can
+#   send the same instrument without the prompt calling a factor a segment. Rows
+#   are numbered by position rather than by a K column, because the factor arm
+#   has no K and a position is what the reply is joined back on.
+prompt_harmonize <- function(lab, unit = "SEGMENT") {
+  rows = str_glue("{unit} {seq_len(nrow(lab))}: LABEL \"{lab$Label}\" | ",
+                  "DESCRIPTION: {lab$Description}")
   str_glue(
-    "DRAFT LABELS FOR THE SEGMENTS OF ONE LATENT CLASS ANALYSIS (LCA) MODEL\n",
+    "DRAFT LABELS FOR THE {unit}S OF ONE MEASUREMENT MODEL\n",
     "{paste(rows, collapse = '\n')}\n\n",
     "TASK\n",
     "Some labels are too similar to tell apart. Edit ONLY the labels that ",
@@ -563,17 +828,21 @@ prompt_harmonize <- function(lab) {
     'JSON (one array, all segments): [{{"class": 1, "label": "..."}}, ...]')
 }
 
-harmonize_labels <- function(lab, cfg) {
-  if (!labels_collide(lab$Label)) return(lab)
-  arr = parse_json_block(lca_chat(cfg)$chat(prompt_harmonize(lab), echo = FALSE),
-                          "(?s)\\[.*\\]")
-  new_lab = map(arr, function(x) tibble(K = as.integer(x$class),
+harmonize_labels <- function(lab, cfg, unit = "SEGMENT",
+                             persona = persona_lca) {
+  if (!harmonise_due(lab$Label, cfg)) return(lab)
+  arr = parse_json_block(
+    llm_chat(cfg, persona, role = "editor")$chat(prompt_harmonize(lab, unit),
+                                                 echo = FALSE),
+    "(?s)\\[.*\\]")
+  new_lab = map(arr, function(x) tibble(.row = as.integer(x$class),
                                          new = as.character(x$label))) |>
     list_rbind()
   lab |>
-    left_join(new_lab, by = "K") |>
+    mutate(.row = row_number()) |>
+    left_join(new_lab, by = ".row") |>
     mutate(Label = coalesce(new, Label)) |>
-    select(-new)
+    select(-new, -.row)
 }
 
 # lca_dir/segment_labels.csv is used when it exists, otherwise the model 
@@ -590,9 +859,15 @@ get_segment_labels <- function(fit, dictionary, items, cfg,
     return(lab |> arrange(K) |> select(all_of(need)))
   }
 
+  w = llm_spec(cfg, "worker")
+  e = llm_spec(cfg, "editor")
   lab = label_segments_llm(fit, dictionary, items, cfg) |>
-    mutate(Label_draft = Label) |>
-    harmonize_labels(cfg)
+    mutate(Label_draft = Label)
+  collided = harmonise_due(lab$Label, cfg)
+  lab = harmonize_labels(lab, cfg) |>
+    mutate(drafted_by = paste(w$provider, w$model),
+           harmonised_by = if (collided) paste(e$provider, e$model) else NA_character_,
+           drafted_on = as.character(Sys.Date()))
   write_csv(lab, cache)
   select(lab, all_of(need))
 }
@@ -674,12 +949,15 @@ fit_cfa <- function(w, items, data, factors = NULL, free = NULL, ordered = TRUE)
 
 # Every item named in the factor spec has to be in the analysis set, or lavaan
 #   fails somewhere unhelpful. 
-# Usually this fires because an item was added to cfa_drop and not removed 
-#   from cfa_factors.
+# Usually this fires because an item was commented out of item_codes and not
+#   removed from cfa_factors.
 check_factors <- function(factors, items) {
   missing = setdiff(unlist(factors), items)
-  if(length(missing)) stop("cfa_factors names items not in cfa_items: ",
-                           paste(missing, collapse = ", "))
+  if(length(missing))
+    stop("cfg$cfa_factors names items that are not in cfg$items: ",
+         paste(missing, collapse = ", "),
+         ". Either restore them to item_codes in the config or remove them ",
+         "from cfa_factors.", call. = FALSE)
   invisible(TRUE)
 }
 
@@ -689,9 +967,26 @@ check_factors <- function(factors, items) {
 #  lavCor turns down the arguments. Feeds the eigenvalue search.
 wcor <- function(w, items, data) {
   d = mutate(data, .w = w)
+  # lavCor drops the sampling weight from the variable set on its own, so the
+  #   returned matrix is over the items only. Checked rather than assumed.
   out = try(lavCor(select(d, all_of(items), .w), ordered = items,
                    sampling.weights = ".w", output = "cor"), silent = TRUE)
-  if(!inherits(out, "try-error")) return(as.matrix(out))
+  if(!inherits(out, "try-error")) {
+    R = as.matrix(out)
+    if(!identical(colnames(R), items))
+      stop("lavCor returned a matrix over ", paste(colnames(R), collapse = ", "),
+           " rather than over the items. Check the lavaan version before ",
+           "reading anything below.", call. = FALSE)
+    return(R)
+  }
+  # The fallback is Pearson on the raw category codes, which is a different
+  #   estimator, not a slower route to the same number. It is announced, because
+  #   an eigenvalue read off a Pearson matrix and one read off a polychoric
+  #   matrix are not comparable and the report would not otherwise say which
+  #   it printed.
+  warning("lavCor refused these arguments; falling back to weighted Pearson ",
+          "correlations. Eigenvalues below are Pearson, not polychoric.",
+          call. = FALSE)
   cov2cor(as.matrix(svyvar(reformulate(items),
                            svydesign(ids = ~1, weights = ~.w, data = d),
                            na.rm = TRUE)))
@@ -729,10 +1024,21 @@ efa_loadings <- function(f, salient = 0.40) {
 
 # The search fit. Same estimator and weighting as fit_cfa, so the exploratory
 #   pass and the confirmatory model are on the same footing.
+#
+# The rotation is asked for through an EFA block inside cfa() rather than
+#   through efa(), and the difference is not stylistic. efa() takes a data frame
+#   and treats every column in it as an indicator, so the sampling weight column
+#   the design requires is factor-analysed alongside the items: it appears in the
+#   loading table, it consumes degrees of freedom, and because a weight vector on
+#   a narrow scale has a tiny variance it becomes the minimum residual variance,
+#   which is the number the admissibility check reads. Naming the items in a
+#   model string is what keeps the weight a weight.
 fit_efa <- function(k, w, items, data) {
   d = mutate(data, .w = w)
-  try(efa(data = select(d, all_of(items), .w), nfactors = k, ordered = items,
-          estimator = "WLSMV", sampling.weights = ".w", rotation = "geomin"),
+  spec = paste0(paste0(sprintf('efa("efa")*f%d', seq_len(k)), collapse = " + "),
+                " =~ ", paste(items, collapse = " + "))
+  try(cfa(spec, data = d, ordered = items, estimator = "WLSMV",
+          sampling.weights = ".w", rotation = "geomin"),
       silent = TRUE)
 }
 
@@ -776,7 +1082,11 @@ format_domain_block <- function(
     dd = filter(d, segment == k)
     cells = map_chr(seq_len(nrow(dd)), function(i) {
       n_lv = m$n[m$level == dd$level[i]]
-      flag = if(length(n_lv) && n_lv < min_n) " [too small]" else ""
+      # A level the marginals did not count gives n_lv of length 0 or NA. Either
+      # way it is not evidence that the level is small, so it carries no flag
+      # rather than halting the prompt build on a missing value.
+      flag = if(length(n_lv) == 1 && !is.na(n_lv) && n_lv < min_n)
+        " [too small]" else ""
       sprintf("%s %.2f [%.2f, %.2f]%s", dd$level[i], dd$p[i], dd$lo[i],
               dd$hi[i], flag)
     })
@@ -847,7 +1157,7 @@ domain_separations <- function(dom, variable, labels = NULL,
              p = if_else(se > 0, 2 * pt(-abs(delta / se), wald$df),
                          if_else(abs(delta) > 0, 0, 1)),
              p_adj = p.adjust(p, "holm")) |>
-      filter(p_adj < alpha) |>
+      filter(!is.na(p_adj), p_adj < alpha) |>
       arrange(segment, p_adj)
     crit_line = paste0("  Criterion: pairwise design-based tests on the ",
                        "replicate covariance, Holm-adjusted within this ",
