@@ -4,16 +4,19 @@ subtitle: "A latent class workflow with replicate variance throughout, applied t
 author: "Kevin Linares"
 date: today
 format:
-  pdf:
+  typst:
     toc: false
     toc-depth: 2
     number-sections: true
+    papersize: us-letter
+    margin:
+      x: 1in
+      y: 1in
     fig-width: 7
     fig-height: 4.5
     fig-align: center
     df-print: kable
-    geometry: margin=1in
-    fig-crop: false
+    keep-typ: true
 bibliography: bibliography.bib
 execute:
   warning: false
@@ -50,7 +53,7 @@ message(if (K_ready) llm_check(cfg) else
 
 # Purpose and scope
 
-This document is both the methodology of a design-based latent class analysis (LCA) workflow and a worked application of it. Every estimator is stated where it is first used and immediately applied, so a reader can follow the reasoning and the results together. The application is the institutional trust battery from the 2023 LAPOP AmericasBarometer survey of Ecuado; the survey is an example, and the methods are the subject.
+This document is both the methodology of a design-based latent class analysis (LCA) workflow and a worked application of it. Every estimator is stated where it is first used and immediately applied, so a reader can follow the reasoning and the results together. The application is the institutional trust battery from the 2023 LAPOP AmericasBarometer survey of Ecuador; the survey is an example, and the methods are the subject.
 
 Throughout, a latent class is called a **segment**. This is a word-choice preference for applied audiences; the statistical object is unchanged.
 
@@ -66,17 +69,17 @@ The Total Survey Error (TSE) framework enumerates the distinct sources of error 
 
 Locating this workflow in that framework clarifies what it does and does not accomplish.
 
-**Sampling error is what this workflow is chiefly about.** Sampling error is the one representation error that is intended and controllable by design, and under a sound design it is variance rather than bias. The difficulty is that estimating it correctly requires using the realized design, and a recognized weakness of practice is that many organizations report only sampling error while computing it as though the sample were simple and random. A latent class model fit to a stratified, clustered sample and analyzed with default software produces margins of error that are too narrow, and the understatement can be large. @sec-variance addresses this directly.
+- **Sampling error is what this workflow is chiefly about.** Sampling error is the one representation error that is intended and controllable by design, and under a sound design it is variance rather than bias. The difficulty is that estimating it correctly requires using the realized design, and a recognized weakness of practice is that many organizations report only sampling error while computing it as though the sample were simple and random. A latent class model fit to a stratified, clustered sample and analyzed with default software produces margins of error that are too narrow, and the understatement can be large. @sec-variance addresses this directly.
 
-**Adjustment error is engaged but not removed.** Post-survey weighting reduces nonresponse and noncoverage bias at the cost of increased sampling variance, and that increase is itself a source of error. This workflow carries the released weights into every step of estimation so that segments describe the population, and reports the unequal weighting effect so the variance cost is visible rather than implicit.
+- **Adjustment error is engaged but not removed.** Post-survey weighting reduces nonresponse and noncoverage bias at the cost of increased sampling variance, and that increase is itself a source of error. This workflow carries the released weights into every step of estimation so that segments describe the population, and reports the unequal weighting effect so the variance cost is visible rather than implicit.
 
-**Nonresponse error is addressed at the item level only.** Respondents who skipped some items are scored from the items they answered rather than discarded, and all domain estimation runs on that larger frame, because item nonresponse on attitude batteries is not random (@sec-scoring). Unit nonresponse is handled by the data provider's weights and is not modeled here.
+- **Nonresponse error is addressed at the item level only.** Respondents who skipped some items are scored from the items they answered rather than discarded, and all domain estimation runs on that larger frame, because item nonresponse on attitude batteries is not random (@sec-scoring). Unit nonresponse is handled by the data provider's weights and is not modeled here.
 
-**Measurement error is the reason to use a latent class model at all.** LCA is used in survey research precisely because it accommodates error-prone categorical indicators: the latent segment is the construct, the items are its fallible measurements, and the conditional response probabilities are estimates of how the measurement behaves within each segment. The model does not remove measurement error; it makes it a parameter.
+- **Measurement error is the reason to use a latent class model at all.** LCA is used in survey research precisely because it accommodates error-prone categorical indicators: the latent segment is the construct, the items are its fallible measurements, and the conditional response probabilities are estimates of how the measurement behaves within each segment. The model does not remove measurement error; it makes it a parameter.
 
-**Processing error is introduced by this workflow and must be acknowledged.** Two steps add error after the response is recorded. Assigning each respondent to a single most likely segment introduces classification error, which attenuates associations between segments and covariates (@sec-domains). Drafting segment names with a language model is a processing step whose output is a label, reviewed and owned by the analyst, that never enters a computation (@sec-labeling).
+- **Processing error is introduced by this workflow and must be acknowledged.** Two steps add error after the response is recorded. Assigning each respondent to a single most likely segment introduces classification error, which attenuates associations between segments and covariates (@sec-domains). Drafting segment names with a language model is a processing step whose output is a label, reviewed and owned by the analyst, that never enters a computation (@sec-labeling).
 
-**Coverage error and validity are out of scope.** They are properties of the frame and the questionnaire, fixed before any analysis begins.
+- **Coverage error and validity are out of scope.** They are properties of the frame and the questionnaire, fixed before any analysis begins.
 
 Two caveats about the framework itself are worth carrying forward. TSE centers on accuracy and is largely silent on the other dimensions of data quality: relevance, timeliness, accessibility, interpretability, and coherence [@brackstone1999]. And its tree structure can imply that error sources are independent when they are frequently correlated; the classification error introduced in @sec-domains, for example, is larger for respondents who answered fewer items, which links a processing error to an item nonresponse error.
 
@@ -151,7 +154,7 @@ $$d_K = (K-1) + K\sum_{j=1}^{J}(C_j - 1),$$
 
 one free parameter per prevalence beyond the last and $C_j-1$ free conditional probabilities per item per segment. the model dimension above is what the information criteria in @sec-selection penalise. This grows linearly in $K$ with slope $\sum_j(C_j-1)$, so batteries with many response categories become expensive quickly. The `r length(cfg$items)` items analysed here carry $\sum_j(C_j-1) =$ `r sum(cats - 1)`, giving `r df_k(4, cats)` free parameters at $K=4$. The factor arm's battery of seven-category items carries $\sum_j(C_j-1) = 6J$: over the eleven items it analyses that is 66, and 334 free parameters at $K=5$, which is why the choice of battery and the choice of model are not separable questions. The counts for this battery are computed by `df_k()` rather than written into this sentence, so they cannot drift from the configuration; the figure for the other battery is quoted for eleven items and has to be revisited if that battery changes.
 
-# Design-weighted estimation
+# Design-weighted estimation {#sec-estimation}
 
 Under a complex design with base weights $w_i$, estimation maximizes the pseudo-log-likelihood
 
@@ -201,7 +204,7 @@ We report alongside these the relative entropy of the posterior classification, 
 $$R^2_E = 1 - \frac{-\sum_i w_i \sum_k p_{ik}\log p_{ik}}
 {\big(\sum_i w_i\big)\log K},$$
 
-which indexes classification sharpness [@ramaswamy1993]. The numerator of the entropy above is the weighted average posterior uncertainty. The numerator is the weighted average posterior uncertainty and the denominator its maximum, attained when every respondent's posterior is uniform over the $K$ segments, so $R^2_E$ runs from 0 at no classification information to 1 at perfect separation; values near 0.8 and above are conventionally read as good classification. Weighting is not cosmetic here: an unweighted entropy would describe the achieved sample's classification sharpness while every other quantity in the analysis describes the population.
+which indexes classification sharpness [@ramaswamy1993]. The numerator of the entropy above is the total weighted posterior uncertainty and the denominator its maximum, attained when every respondent's posterior is uniform over the $K$ segments, so $R^2_E$ runs from 0 at no classification information to 1 at perfect separation; values near 0.8 and above are conventionally read as good classification. Weighting is not cosmetic here: an unweighted entropy would describe the achieved sample's classification sharpness while every other quantity in the analysis describes the population.
 
 The bootstrap likelihood ratio test, often preferred for class enumeration under simple random sampling [@nylund2007], is omitted by design. Its parametric bootstrap draws new samples of independent observations from the fitted model, which is not the process that generated a stratified clustered sample. Mplus disables the test under complex-design analysis for the same reason, and nothing is gained by reporting a p-value whose null distribution is known to be wrong.
 
@@ -294,7 +297,11 @@ Replication is a choice here, not a necessity: a pseudo-likelihood does admit a 
 
 Each replicate refits the weighted EM on the replicate weights, warm-started from the full-sample solution and aligned to it by the alignment criterion above. The resulting variance is therefore **within-mode** by construction: it expresses design variance around the reported solution, not uncertainty about which mode the likelihood surface should have selected.
 
-A stratum containing a single PSU cannot receive the $a_h/(a_h-1)$ scaling. The `survey.lonely.psu` option governs linearization variance and does not change how replicate weights are constructed, so a singleton stratum would contribute no variance and the resulting standard errors would be anticonservative in exactly the strata where the data are thinnest. The workflow therefore treats singleton strata as a hard stop, and performs the check on the analysis frame rather than the released file, because case exclusions can create singletons the provider's data does not have.
+A stratum containing a single PSU cannot receive the $a_h/(a_h-1)$ scaling. The `survey.lonely.psu` option governs linearization variance and does not change how replicate weights are constructed, so a singleton stratum would contribute no variance and the resulting standard errors would be anticonservative in exactly the strata where the data are thinnest. The workflow therefore treats singleton strata as a hard stop.
+
+The design is built once, on the whole analysis frame, and is never rebuilt on a case-excluded subset. Rebuilding on a subset is the conditional subpopulation approach: it can drop a PSU that contributed no surviving respondent, which changes $a_h$, the $a_h/(a_h-1)$ scaling and the design degrees of freedom, so the resulting interval is no longer the design variance of a domain in the sample that was actually drawn. SURV701 states the rule directly --- subset the design, not the data --- and names dropped PSUs and singleton computation units as the failure mode. The unconditional approach keeps the replicate structure of the realised sample and restricts the replicate weights to the rows of interest through a `keep` index; for a ratio estimator, and for the weighted EM, a zero-weight row and an absent row contribute identically, so this is the same computation at the same cost. Earlier versions of this document rebuilt the design on the item-complete frame and again on the scored frame. No PSU was lost on this file --- both return 84 replicates and 81 degrees of freedom --- so no number here changes, but the construction was wrong and the corrected form is what `build_rep_design()` now does.
+
+One `survey` option is load-bearing and easy to leave at its default. `as.svrepdesign()` takes `mse` from `getOption("survey.replicates.mse")`, which is `FALSE`, and `svrVar()` then centres the replicate spread on the mean of the replicates. `replicate_variance()` below centres on the full-sample estimate, which is the JKn formula above. Left at the default, the design-based rows of the domain tables in @sec-domains (computed by `svyby`) and the corrected rows (computed by `replicate_variance()`) would come from two different variance estimators, and this document would compare their widths as though they were one. `build_rep_design()` sets `mse = TRUE` explicitly.
 
 Intervals for every probability are formed on the logit scale by the delta method. Since $\mathrm{d}\,\mathrm{logit}(p)/\mathrm{d}p = 1/\{p(1-p)\}$,
 
@@ -330,9 +337,15 @@ param_meta <- bind_rows(
 
 flatten_fit <- function(fit) c(fit$pi, unlist(map(fit$rho, as.vector)))
 
+# maxit matches the full-sample fit. It was 5000 there and 1000 here for no
+# stated reason, which is a difference in how hard the two halves of one
+# estimate are tried: a replicate that stops at the cap enters the variance as
+# a systematic deviation, which is the bias the matched tolerance above exists
+# to prevent. The fit is checked rather than assumed.
 theta_fun <- function(w_rep) {
   fit <- em_run(inp$Y, inp$OH, cats, w_rep, K_star,
-                init = fit_w[c("pi", "rho")], maxit = 1000L, tol = 1e-10)
+                init = fit_w[c("pi", "rho")], maxit = 5000L, tol = 1e-10)
+  stopifnot(isTRUE(fit$converged))
   flatten_fit(align_to(fit, fit_w))
 }
 
@@ -387,18 +400,30 @@ be the model-implied joint distribution, where $\boldsymbol\rho_a$ is the $C_a\t
 $$\mathrm{BVR}_{ab} = \frac{1}{2}\sum_{c,d}
 \big|\widehat P_{ab}(c,d) - \Pi_{ab}(c,d)\big| \in [0,1].$$
 
-This departs from the Pearson-type statistic conventionally reported, and deliberately. @oberski2013 showed that the Pearson statistic's null distribution is already not chi-square for unweighted binary data, recommending bootstrap calibration; under design weighting and a pseudo-likelihood on a clustered sample no reference distribution is valid at all. A Rao-Scott design adjustment would repair the design component but not the fact that the residual's null is not chi-square even under simple random sampling, so it does not rescue the statistic here. A statistic without a null distribution is an effect size, and an effect size should sit on an interpretable scale: the residual above is bounded in $[0,1]$, is exactly zero under perfect local independence, reads as the largest probability discrepancy over any event in the two-way table, and shares its scale with the discrimination formula above. It also removes a numerical failure of the Pearson form, which divides by the model-implied cell probability and so can be dominated by a single near-empty corner of a large table.
+This departs from the Pearson-type statistic conventionally reported, and deliberately. @oberski2013 showed that the Pearson statistic's null distribution is already not chi-square for unweighted binary data, recommending bootstrap calibration; under design weighting and a pseudo-likelihood on a clustered sample no reference distribution is valid at all. A Rao-Scott design adjustment would repair the design component but not the fact that the residual's null is not chi-square even under simple random sampling, so it does not rescue the statistic here. A statistic without a null distribution is an effect size, and an effect size should sit on an interpretable scale: the residual above is bounded in $[0,1]$, is exactly zero under perfect local independence, reads as the largest probability discrepancy over any event in the two-way table, and shares its scale with the discrimination formula above.
+
+The bound is not the same thing as comparability, and the distinction matters for how the table below is read. Every cell of the observed table carries sampling noise, so the residual a correctly specified model produces grows with the number of cells: a four-category item crossed with a binary one has eight cells and sits higher under the null than two binary items with four. The bound holds regardless; the null does not. The table therefore prints the cell count beside the residual, and a pair should be compared against pairs of the same table size rather than read off the ranking alone. A design-respecting reference --- simulating from the fitted model under the realised cluster structure and reading each residual against its own simulated distribution --- would remove the need for that caution and is the obvious extension; it is not done here. It also removes a numerical failure of the Pearson form, which divides by the model-implied cell probability and so can be dominated by a single near-empty corner of a large table.
 
 ```{r bvr-table}
 #| eval: !expr K_ready
 bvr_tbl <- bvr_pairs(dat, w_vec, cfg$items, fit_w)
 
+# Cells is printed beside the residual because the two are not independent.
+# The bound [0, 1] holds whatever the table size, but the value the residual
+# takes under a correctly specified model does not: every cell carries sampling
+# noise, so a table with more cells accumulates more of it and sits higher under
+# the null. Ranking an 8-cell pair against a 4-cell pair on the raw value ranks
+# the table sizes as well as the dependence.
 bvr_tbl |>
-  mutate(bvr = round(bvr, 3)) |>
+  mutate(cells = as.integer(cats[item_a]) * as.integer(cats[item_b]),
+         bvr = round(bvr, 3)) |>
   slice_head(n = 10) |>
-  lca_table(align = "llr", col.names = c("Item A", "Item B", "BVR"),
-            widths = c("14em", "14em", "6em"),
-            caption = "Ten largest bivariate residuals. A ranking, not a test.")
+  select(item_a, item_b, cells, bvr) |>
+  lca_table(align = "llrr", col.names = c("Item A", "Item B", "Cells", "BVR"),
+            widths = c("13em", "13em", "5em", "5em"),
+            caption = "Ten largest bivariate residuals, with the size of the
+            two-way table each was computed on. A ranking, not a test, and not
+            a ranking that is comparable across table sizes.")
 ```
 
 ```{r bvr-heatmap}
@@ -493,7 +518,7 @@ lab_line <- function(k) paste0("S", k, ": ", segment_labels$Label[k])
 lab_short <- function(k) paste0("S", k)
 ```
 
-# The measurement model
+# The measurement model {#sec-measurement}
 
 ```{r tbl-prevalence}
 #| echo: false
@@ -574,7 +599,18 @@ map(seq_len(K_star), function(k)
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-The same comparison as one number. The ratio below is the spread of the segments' item-by-item deviations over the spread of their overall levels, with every item rescaled so that a binary and a four-category item contribute the same possible range; without that rescaling the ratio is an artifact of the response formats. Well under one says the segments differ mainly in how high they answer overall, which is a continuum, and a factor model would describe it in a fraction of the parameters. Near or above one says they reorder the items, which is structure no single factor can hold. It is evidence about which arm this battery calls for rather than a test, and it is read against the eigenvalue evidence in the factor report.
+The same comparison as one number. Write $m_{kj}$ for segment $k$'s expected response to item $j$, rescaled to $[0,1]$ so that a binary and a four-category item contribute the same possible range; without that rescaling the ratio is an artifact of the response formats. Decompose it,
+
+$$m_{kj} = \bar m + \underbrace{(\ell_k - \bar m)}_{\text{level}}
++ \underbrace{(\mu_j - \bar m)}_{\text{item}}
++ \underbrace{e_{kj}}_{\text{pattern}},
+\qquad e_{kj} = m_{kj} - \ell_k - \mu_j + \bar m,$$
+
+where $\ell_k$ is segment $k$'s mean over items, $\mu_j = \sum_k \pi_k m_{kj}$ is the item's prevalence-weighted mean over segments, and $\bar m = \sum_k \pi_k \ell_k$. The ratio reported below is the prevalence-weighted spread of the pattern term over the prevalence-weighted spread of the level term. Well under one says the segments differ mainly in how high they answer overall, which is a continuum, and a factor model would describe it in a fraction of the parameters. Near or above one says they reorder the items, which is structure no single factor can hold. It is evidence about which arm this battery calls for rather than a test, and it is read against the eigenvalue evidence in the factor report.
+
+Two things about that construction are corrections to earlier versions of this document, and both move the number. The pattern term is the segment-by-item interaction $e_{kj}$, not the deviation $m_{kj} - \ell_k$ of an item from its own segment's level. The deviation still carries the item main effect $\mu_j - \bar m$ --- the fact that some questions are endorsed more than others --- which is a property of the battery and says nothing about whether the segments reorder anything. Left in, the statistic is strictly positive under the only null it claims to read on: when $m_{kj} = \ell_k + \mu_j$ exactly, every segment answers in the same order, $e_{kj} = 0$, and the ratio should be zero, but the deviation form returns $\mathrm{sd}(\mu_j)/\mathrm{sd}(\ell_k)$, which is unbounded. It also moved when a constant was added to one item across every segment, which must not change the answer. Separately, both spreads and both marginals are now weighted by segment prevalence: unweighted, a segment holding four per cent of the population counted as much as one holding forty, so the ratio tracked the size of the smallest segment rather than the shape of the battery. On this fit the deviation form gives 3.78 unweighted and 5.9 weighted, against 4.3 for the interaction form reported here. The reading does not change; the number does, and only the last of the three is measuring what the sentence above says it measures.
+
+The ratio is descriptive and comparable within a battery, not across batteries: the interaction residuals sum to zero over segments and over items, so their spread depends on both counts. Nothing selects on it and no threshold is attached to it.
 
 ```{r level-pattern}
 #| echo: false
@@ -616,7 +652,7 @@ $$p^{\mathrm{obs}}_{ik} = \frac{\pi_k \prod_{j\in A_i}\rho_{j\,y_{ij}\,k}}
 \qquad
 \hat X_i = \arg\max_k p^{\mathrm{obs}}_{ik} ,$$
 
-the posterior above is the exact posterior given what respondent $i$ actually answered, under the model and under ignorability of the missingness pattern given segment. An information floor `cfg$min_items` is enforced: respondents answering fewer items receive no assignment rather than a weakly informed one.
+the posterior above is the exact posterior given what respondent $i$ actually answered, under the model and under the condition $R_i \perp X_i \mid \mathbf y_{\mathrm{obs},i}$: response propensity is conditionally independent of segment given the answers the respondent did give. That is stronger than it sounds and it is an assumption rather than a consequence of local independence. If the probability of skipping an item depends on segment directly, the factor $P(R_i \mid X_i = k)$ does not cancel from the ratio above and the posterior is pulled toward $\pi$. The paragraph below argues that item nonresponse tracks education and age, which are themselves associated with segment, so the condition is unlikely to hold exactly here; the practical consequence is small only because almost every partial responder is missing a single item. An information floor `cfg$min_items` is enforced: respondents answering fewer items receive no assignment rather than a weakly informed one.
 
 Scoring precedes domain estimation, and all domain estimation runs on the scored frame rather than the estimation sample. This follows the logic of three-step latent class analysis, in which the assignment step covers every respondent it validly can, and it matters substantively rather than cosmetically: item nonresponse on an attitude battery correlates with education, age, and other characteristics of interest, so restricting domain estimation to complete responders introduces a selection into exactly the composition being estimated. This is the item-level nonresponse concern of @sec-tse.
 
@@ -665,6 +701,28 @@ scored |>
             If the mean falls sharply at the low end, raise cfg$min_items.")
 ```
 
+The same quantity by domain level is the diagnostic the BCH correction of @sec-domains rests on, because one pooled classification table is inverted for every level. If assignment sharpness differs across the levels of a demographic, the classification error rates differ with it, and a single $\hat D$ is the wrong object for all of them. This is read before the corrected column is quoted; nothing is corrected on the strength of it and no threshold is attached.
+
+```{r score-quality-by-level}
+#| echo: false
+#| eval: !expr K_ready
+map(cfg$aux, function(v)
+  scored |>
+    filter(!is.na(.data[[v]])) |>
+    group_by(level = as.character(.data[[v]])) |>
+    summarise(n = n(), mmp = mean(max_posterior), .groups = "drop") |>
+    mutate(variable = v)) |>
+  list_rbind() |>
+  transmute(Variable = variable, Level = level, n,
+            `Mean max posterior` = sprintf("%.3f", mmp)) |>
+  lca_table(align = "llrr", widths = c("8em", "14em", "5em", "10em"),
+            caption = "Assignment quality by domain level. The BCH correction
+            inverts one classification table for every level of a demographic,
+            which assumes the error rates are the same at each. Levels whose
+            mean sits well below the others are where that assumption is
+            weakest.")
+```
+
 # Domain estimation {#sec-domains}
 
 The quantity of interest is segment prevalence within demographic domains. Writing $d$ for a level of a demographic variable,
@@ -680,7 +738,14 @@ Each domain table carries the same quantity three ways, so the two corrections c
 
 ### The correction
 
-This estimator uses hard modal assignment and is therefore **attenuated**. Classification error pulls composition toward the marginal distribution, so differences between demographic levels are understated [@bolck2004; @vermunt2010]. The direction is what makes this tractable: a difference that survives modal assignment is real, while a null under modal assignment may be a genuine difference that classification error erased. The BCH correction removes it [@bolck2004; @vermunt2010; @bakk2013; @bakk2014].
+This estimator uses hard modal assignment and is therefore **attenuated**. Classification error pulls composition toward the marginal distribution, so differences between demographic levels are understated [@bolck2004; @vermunt2010]. The BCH correction removes it [@bolck2004; @vermunt2010; @bakk2013; @bakk2014]. Writing $W_i$ for the modal assignment, the design-weighted classification table is
+
+$$\hat D_{ks} = \frac{\sum_i w_i\, p_{ik}\,\mathbf 1(W_i = s)}
+{\sum_i w_i\, p_{ik}},$$
+
+the probability that a respondent truly in segment $k$ is assigned to segment $s$. Each respondent's hard assignment is replaced by row $W_i$ of $\hat D^{-1}$, so respondent $i$ contributes the vector $w_i\,(\hat D^{-1})_{W_i\cdot}$ where the design-based estimator contributed a single indicator; the denominator of the domain estimator above is unchanged. Because $\hat D$ is row-stochastic, $\hat D\mathbf 1 = \mathbf 1$ and hence $\hat D^{-1}\mathbf 1 = \mathbf 1$, so the rows of the inverse sum to one and the corrected shares still sum to one across segments. Individual entries of $\hat D^{-1}$ are routinely negative, so a corrected share can fall outside $[0,1]$. That is a property of the estimator rather than a fault, and such cells are reported untruncated and flagged rather than clipped to a boundary the estimator did not produce.
+
+Two conditions on the correction have to be stated rather than assumed. One pooled $\hat D$ is inverted for every domain, which requires the classification error rates to be the same at every level of the demographic --- non-differential classification with respect to the domain variable. @sec-scoring shows that respondents who answered fewer items carry flatter posteriors, and item nonresponse is not independent of age or education, so the condition is not guaranteed here; the by-level mean maximum posterior reported below is the diagnostic, and it has to be read before the corrected column is quoted. And $\hat D$ has to be well enough conditioned for its inverse to mean anything. An exactly singular table stops the run because `solve()` refuses it; a near-singular one --- a segment that took very few modal assignments --- does not, and the correction it produces is unstable rather than visibly wrong. The engine attaches the reciprocal condition number of $\hat D$ to every call, and replicates falling below the floor are counted and disclosed rather than dropped, which is the only honest treatment available: there is nothing to repair.
 
 ```{r domain-estimates}
 #| eval: !expr K_ready
@@ -751,9 +816,17 @@ domain_bch <- dom_meta |>
 # Design-based estimator as a theta function, so the full replicate covariance
 # between domain estimates exists. The separations are Wald contrasts on this
 # covariance rather than an interval-overlap rule, which tested at an alpha
-# well below its nominal level. Design-based rather than BCH is deliberate:
-# modal assignment attenuates differences, so a pair resolved here separates
-# despite the classification error.
+# well below its nominal level.
+# The tests run on the design-based estimator because that estimator's
+# intervals are the ones printed beside them, so a reader can check the test
+# against a table in front of them. This is NOT a claim that the uncorrected
+# test is the conservative one. An earlier version of this comment said modal
+# assignment attenuates differences, so a pair resolved here "can only widen"
+# under the correction. That does not follow: BCH moves the point difference
+# and its standard error at once -- the inverse classification table has
+# diagonal entries above one and off-diagonal entries that are routinely
+# negative -- and the ratio of the two is not signed in general. Which test is
+# the conservative one is an empirical property of this D, not of the method.
 S_fixed <- outer(modal_fixed, seq_len(K_star), `==`) + 0
 
 domain_theta_dsg <- function(w_rep) {
@@ -794,8 +867,18 @@ domain_naive <- map(cfg$aux, function(v) {
     transmute(variable = v, level = as.character(level),
               segment = as.integer(segment), p,
               se = sqrt(p * (1 - p) / n_level),
-              lo = pmax(0, p - qnorm(0.975) * se),
-              hi = pmin(1, p + qnorm(0.975) * se))
+              # Logit-scale, like every other interval here. The three
+              # estimators are compared on the width of their intervals,
+              # in the text below and in the prompt of @sec-domain-read, so the
+              # construction has to be held constant or the ratio is part
+              # estimator and part transform. The 1.96 stays: this row is a
+              # binomial standard error on a plain cross-tab and carries no
+              # design degrees of freedom.
+              p_c = pmin(pmax(p, 1e-3), 1 - 1e-3),
+              gse = se / (p_c * (1 - p_c)),
+              lo = plogis(qlogis(p_c) - qnorm(0.975) * gse),
+              hi = plogis(qlogis(p_c) + qnorm(0.975) * gse)) |>
+      select(-p_c, -gse)
 }) |>
   list_rbind() |>
   arrange(variable, segment, level)
@@ -846,7 +929,7 @@ cat(sprintf(paste0("Weighting moves the point estimates by a median of %.4f;
 
 ```
 
-Before anything is sent, R tests every pair of levels within each segment: a design-based Wald test on the difference, using the replicate covariance between the two estimates, Holm-adjusted across the pairs within the demographic. The model is handed the list of pairs that resolve and told to name only those. The tests run on the design-based estimator deliberately, since its attenuation means a difference resolved there separates despite the classification error, and the corrected columns can only widen it.
+Before anything is sent, R tests every pair of levels within each segment: a design-based Wald test on the difference, using the replicate covariance between the two estimates, Holm-adjusted across the pairs within the demographic. The model is handed the list of pairs that resolve and told to name only those. The tests run on the design-based estimator because its intervals are the ones printed in the tables above, so a reader can check a listed pair against numbers in front of them. That is a reporting choice and not a claim that the uncorrected test is the conservative one: the correction moves the difference and its standard error together, the inverse classification table carries diagonal entries above one and negative entries off it, and the ratio of the two is not signed in general. Whether correcting strengthens or weakens a given contrast is an empirical property of this $\hat D$, and neither direction is asserted here.
 
 ```{r step1-propagation}
 #| eval: !expr K_ready
@@ -862,7 +945,7 @@ aux_s1 <- cfg$aux[1]
 theta_step1 <- function(w_rep) {
   fit_r = align_to(em_run(inp$Y, inp$OH, cats, w_rep[idx_est], K_star,
                           init = fit_w[c("pi", "rho")],
-                          maxit = 1000L, tol = 1e-10), fit_w)
+                          maxit = 5000L, tol = 1e-10), fit_w)
   post_r = posterior_of(fit_r$pi, fit_r$rho, Y_sc)
   modal_r = max.col(post_r, ties.method = "first")
   wU = w_rep * bch_weights(post_r, modal_r, w_rep)
@@ -879,9 +962,17 @@ Theta_s1 <- do.call(rbind, future_map(seq_len(ncol(Wm_s)), function(r) {
   out = try(theta_step1(Wm_s[, r]), silent = TRUE)
   if (inherits(out, "try-error")) rep(NA_real_, length(est_s1)) else out
 }, .options = furrr_options(seed = NULL)))
-ok <- complete.cases(Theta_s1)
-d_s1 <- sweep(Theta_s1[ok, , drop = FALSE], 2, est_s1, "-")
-se_s1 <- sqrt(diag(rep_des_s$scale * crossprod(d_s1 * sqrt(rep_des_s$rscales[ok]))))
+# A failed replicate is counted and halts, never quietly dropped. Dropping a
+# deviation can only narrow the spread, so a silently shortened sum understates
+# the very quantity this chunk exists to measure, and it does so in the
+# direction that makes the answer look better.
+n_failed <- sum(!complete.cases(Theta_s1))
+if (n_failed > 0)
+  stop(n_failed, " of ", nrow(Theta_s1), " replicates failed to refit. The ",
+       "step-one sensitivity cannot be reported from the survivors, because ",
+       "dropping them narrows the spread it is measuring.")
+d_s1 <- sweep(Theta_s1, 2, est_s1, "-")
+se_s1 <- sqrt(diag(rep_des_s$scale * crossprod(d_s1 * sqrt(rep_des_s$rscales))))
 
 s1_tbl <- dom_meta |>
   filter(variable %in% aux_s1) |>
@@ -890,7 +981,7 @@ s1_tbl <- dom_meta |>
              by = c("variable", "level", "segment")) |>
   mutate(ratio = se_step1 / se)
 
-glue("Replicates converged: {sum(ok)} of {nrow(Theta_s1)}. ",
+glue("Replicates converged: {nrow(Theta_s1) - n_failed} of {nrow(Theta_s1)}. ",
      "Propagating step one multiplies the BCH standard errors for {aux_s1} ",
      "by a median of {round(median(s1_tbl$ratio, na.rm = TRUE), 2)} ",
      "and at most {round(max(s1_tbl$ratio, na.rm = TRUE), 2)}.")
@@ -1074,9 +1165,19 @@ The pseudo-likelihood can be multimodal with near-tied optima. The reported solu
 
 The measurement model is fit on item-complete cases while scoring and domain estimation extend to partially observed respondents. Respondents scored from fewer items carry more classification error, which is the correlated-error case flagged in @sec-tse: a processing error whose magnitude depends on an item nonresponse error.
 
-Domain estimates are reported both uncorrected and BCH-corrected. The uncorrected version uses hard modal assignment and understates differences between demographic levels, so a difference that appears there is real while a null is not evidence of no association. The corrected version removes that attenuation but conditions on the fitted measurement model: step-one parameter uncertainty is not propagated in the reported intervals. This is standard three-step practice, and the sensitivity refit above shows what it costs. Rebuilding the measurement model inside every replicate multiplies the BCH standard errors for `r if (K_ready) cfg$aux[1] else "the first demographic"` by a median of `r if (K_ready) round(median(s1_tbl$ratio, na.rm = TRUE), 2) else "(pending K)"` and by as much as `r if (K_ready) round(max(s1_tbl$ratio, na.rm = TRUE), 2) else "(pending K)"`, against a weighted relative entropy of `r if (K_ready) round(entropy_R2(post_w, w_vec, K_star), 2) else "(pending K)"` rather than the high-separation regime in which fixed step one is usually defended [@bakk2014]. Read the reported BCH intervals as optimistic by that median factor, and do not quote a separation that would not survive intervals of that width. These figures are computed by the sensitivity chunk above and are not carried over from an earlier render.
+That split has a second consequence the classification-error argument does not cover: $\hat\pi$ and the domain estimates are not estimates for the same population. The prevalences in @sec-measurement describe item-complete responders; everything in @sec-domains describes every respondent the model could place. If completeness is related to segment --- and @sec-scoring argues it is --- the two differ, and the gap is visible in this fit. Weighting the corrected domain estimates back up by the population composition returns segment shares of roughly 0.21, 0.48, 0.21 and 0.10 against the model's 0.208, 0.500, 0.192 and 0.100: the correction recovers the model prevalence for the first and fourth segments and misses by about two points on the second and third. Some of that is rounding through the published tables and some is the frame. The clean fix is not a caveat. @sec-estimation restricts the $\hat\rho$ denominator to respondents who answered the item and a missing item contributes zero on the log scale, so the pseudo-likelihood already admits partial responders exactly; fitting on the scored frame rather than on complete cases removes the mismatch instead of documenting it, and it is inconsistent to assume ignorability for scoring while refusing it for estimation. This document still fits on complete cases, and that is the first thing to change in the next revision.
 
-Bivariate residuals and the indicator screen are rankings without reference distributions. They order item pairs and items by how poorly the model accounts for them and support no test.
+Domain estimates are reported both uncorrected and BCH-corrected. The uncorrected version uses hard modal assignment, which pulls composition toward the marginal distribution and so understates differences between demographic levels. It does not follow that a difference resolved on the uncorrected estimator is thereby safe: the correction moves the point difference and its standard error at the same time, the inverse classification table carries diagonal entries above one and negative entries off it, and the ratio of the two is not signed in general. Which of the two tests is the conservative one is an empirical property of this $\hat D$ and is not claimed here in either direction. The uncorrected test is the one reported because its intervals are the ones printed beside it.
+
+The correction also assumes non-differential classification: one pooled $\hat D$ is inverted for every level of every demographic, which requires the classification error rates to be the same at each. That assumption is not tested, and @sec-scoring gives two reasons to doubt it holds exactly here --- posterior sharpness falls with the number of items answered, and item nonresponse is not independent of age or education. The by-level assignment quality table in @sec-scoring is the diagnostic; where a level's mean maximum posterior sits well below the others, its corrected row carries more error than its interval shows, and in a direction the interval cannot express.
+
+The corrected version conditions on the fitted measurement model: step-one parameter uncertainty is not propagated in the reported intervals. This is standard three-step practice, and the sensitivity refit above shows what it costs. Rebuilding the measurement model inside every replicate multiplies the BCH standard errors for `r if (K_ready) cfg$aux[1] else "the first demographic"` by a median of `r if (K_ready) round(median(s1_tbl$ratio, na.rm = TRUE), 2) else "(pending K)"` and by as much as `r if (K_ready) round(max(s1_tbl$ratio, na.rm = TRUE), 2) else "(pending K)"`, against a weighted relative entropy of `r if (K_ready) round(entropy_R2(post_w, w_vec, K_star), 2) else "(pending K)"` rather than the high-separation regime in which fixed step one is usually defended [@bakk2014]. Read the reported BCH intervals as optimistic by that median factor, and do not quote a separation that would not survive intervals of that width. These figures are computed by the sensitivity chunk above and are not carried over from an earlier render.
+
+Bivariate residuals and the indicator screen are rankings without reference distributions. They order item pairs and items by how poorly the model accounts for them and support no test. The bivariate residual carries a further caution set out in @sec-diagnostics: the value it takes under a correctly specified model rises with the size of the two-way table, so the ranking is not comparable across pairs with different numbers of categories, and the cell count is printed beside it for that reason.
+
+The item discrimination $D_j$ averages over segment pairs uniformly, so a pair of small segments counts as much as a pair of large ones. It is a property of the measurement model rather than of the population, which is the intended reading, but it should not be described as the gap between two segments drawn at random unless segments are drawn uniformly rather than by prevalence.
+
+The information criteria penalise on $\log n$, with $n$ the number of sampled cases. Under clustering the effective sample size is smaller than $n$, so the penalty is weaker than a design-based criterion would impose and BIC leans toward more segments than the design supports. At the median design effect implied by the standard errors here the penalty would fall by about $0.18$ per parameter, which narrows the gap between $K = 4$ and $K = 5$ from roughly 24 BIC units to 21 and changes nothing about the selection. On a design with more clustering it could.
 
 The replicate count equals the number of PSUs, so the replicate covariance matrix has rank at most that number. Individual variances and pairwise covariances remain consistent, which is all the reported quantities require, but a joint Wald test across more dimensions than there are replicates is not available.
 

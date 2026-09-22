@@ -66,6 +66,9 @@ fit_widths <- function(n_col, first = 2, total = 44) {
 }
 
 lca_table <- function(df, ..., caption = NULL, widths = NULL, font_size = 8) {
+  if (isTRUE(knitr::pandoc_to("typst")))
+    return(lca_table_typst(df, ..., caption = caption, widths = widths,
+                           font_size = font_size))
   if (!is_latex_output())
     return(knitr::kable(df, format = "pipe", caption = caption, ...))
   if (!is.null(caption))
@@ -79,6 +82,83 @@ lca_table <- function(df, ..., caption = NULL, widths = NULL, font_size = 8) {
     if (nzchar(widths[i])) kableExtra::column_spec(tbl, i, width = widths[i]) else tbl
   }, .init = out)
 }
+
+# Typst renders tables from this branch. A plain pipe table handed to pandoc
+#   arrives with auto-sized columns at body text size, which is what ran off the
+#   page: the widths and font size the LaTeX branch applies never reach it, and
+#   pandoc's Typst writer does not reliably turn pipe-table dash counts into
+#   column widths, so encoding the widths in the markdown would be a fix that
+#   depends on which pandoc Quarto bundles. The table is written as Typst.
+# Widths are the same em values the LaTeX branch takes, plus 8pt. A LaTeX p{w}
+#   column excludes its padding and a Typst column width includes it, so the
+#   same number left each cell 8pt less room and single words like "Homemaker"
+#   collided with the next column.
+# Every cell and caption goes in as a quoted string, never as markup, so an
+#   asterisk in a level name or a dagger in a cell is printed rather than
+#   interpreted. jsonlite does the quoting: a whitespace-squished JSON string
+#   uses only the \" and \\ escapes, which Typst reads identically; the gsub
+#   covers \uXXXX, which Typst spells \u{XXXX}, in case jsonlite ever emits one.
+# The figure is breakable so a long table continues onto the next page, and
+#   table.header() repeats at the top of each page -- what longtable and
+#   repeat_header did under LaTeX.
+lca_table_typst <- function(df, ..., caption = NULL, widths = NULL,
+                            font_size = 8) {
+  dots = list(...)
+  n = ncol(df)
+  
+  typ_str = function(x) {
+    x = enc2utf8(as.character(x))
+    x[is.na(x)] = "NA"
+    s = sub("^\\[(.*)\\]$", "\\1", as.character(jsonlite::toJSON(str_squish(x))))
+    gsub("(?<!\\\\)\\\\u([0-9a-fA-F]{4})", "\\\\u{\\1}", s, perl = TRUE)
+  }
+  
+  hdr = if (is.null(dots$col.names)) names(df) else dots$col.names
+  
+  al = dots$align
+  if (is.null(al)) al = if_else(map_lgl(df, is.numeric), "r", "l")
+  if (length(al) == 1L) al = strsplit(al, "")[[1]]
+  al = coalesce(unname(c(l = "left", r = "right", c = "center")[rep_len(al, n)]),
+                "left")
+  
+  w = c(widths, rep("", n))[seq_len(n)]
+  cols = if_else(str_detect(w, "^[0-9.]+em$"), paste0(w, " + 8pt"), "auto")
+  
+  m = df |>
+    mutate(across(where(is.numeric), \(x) format(x, trim = TRUE)),
+           across(everything(), as.character)) |>
+    as.matrix()
+  rows = map_chr(seq_len(nrow(m)), \(i) paste0("        ", typ_str(m[i, ]), ","))
+  
+  cap = if (is.null(caption)) character(0) else
+    paste0("    caption: figure.caption(position: top, ", typ_str(caption), "),")
+  
+  knitr::asis_output(paste(c(
+    "", "```{=typst}",
+    "#{",
+    "  show figure: set block(breakable: true)",
+    "  figure(",
+    "    {",
+    paste0("      set text(size: ", font_size, "pt)"),
+    "      table(",
+    paste0("        columns: (", paste(cols, collapse = ", "), ",),"),
+    paste0("        align: (", paste(al, collapse = ", "), ",),"),
+    "        inset: (x: 4pt, y: 3pt),",
+    "        stroke: none,",
+    "        table.hline(),",
+    paste0("        table.header(", typ_str(hdr), "),"),
+    "        table.hline(stroke: 0.5pt),",
+    rows,
+    "        table.hline(),",
+    "      )",
+    "    },",
+    cap,
+    "    kind: table,",
+    "  )",
+    "}",
+    "```", ""), collapse = "\n"))
+}
+
 
 init_parallel <- function(cfg) {
   if (isTRUE(cfg$parallel)) {
@@ -161,6 +241,18 @@ em_run <- function(Y, OH, cats, w, K, init = NULL, maxit = 800L, tol = 1e-8) {
 
   out = reduce(seq_len(maxit), step, .init = st0)
   out$converged = out$done
+
+  # step() computes post and ll from the parameters it was HANDED and returns
+  #   them beside the parameters it produced, so out$post is one M-step behind
+  #   out$pi and out$rho. At convergence the gap is below tol and nothing
+  #   notices; on a run that stopped at maxit it is a posterior that is not the
+  #   E-step of the model being reported, and entropy is read off it. One more
+  #   E-step settles it.
+  # out$ll is deliberately left where it was: it is what the enumeration table
+  #   and BIC are formed from, and moving it by an epsilon would change which
+  #   model the criteria rank first for no methodological gain. The lag it
+  #   carries is smaller than the convergence tolerance wherever it is used.
+  out$post = posterior_of(out$pi, out$rho, Y)
   out
 }
 
@@ -273,18 +365,55 @@ item_discrimination <- function(fit, items) {
 #   with far fewer parameters. 
 # Near or above 1 says they reorder the items, which is structure no single 
 #   factor can hold.
+# The pattern term is the segment-by-item INTERACTION,
+#   e_kj = m_kj - level_k - item_j + grand, not the deviation m_kj - level_k of
+#   an item from its own segment's level. Those are not the same quantity. A
+#   deviation from the segment level still carries the item main effect -- the
+#   fact that some questions are endorsed more than others -- which is a
+#   property of the battery and says nothing about whether the segments reorder
+#   anything. Left in, the statistic is strictly positive under the only null
+#   it claims to read on: when m_kj = level_k + item_j every segment answers in
+#   the same order, the interaction is zero and the ratio should be zero, but
+#   the deviation form returns sd(item_j) / sd(level_k), which is unbounded. It
+#   also moved when a constant was added to one item across every segment,
+#   which must not change the answer.
+# Both dispersions and both marginals are weighted by segment prevalence.
+#   Unweighted, sd_level is the spread of K numbers in which a segment holding
+#   four per cent of the population counts as much as one holding forty, so the
+#   ratio tracked the size of the smallest segment rather than the shape of the
+#   battery. Every marginal in the decomposition has to be taken over the same
+#   population or the residual is not an interaction with respect to anything.
+# On the Ecuador fit the old form gives 3.78, the old form weighted gives 5.9,
+#   and this one gives 4.3. The reading does not change; the number does.
+# The ratio is descriptive and comparable within a battery, not across
+#   batteries: the interaction residuals sum to zero over segments and over
+#   items, so their spread depends on both counts. Nothing selects on it and no
+#   threshold is attached to it.
 level_pattern_ratio <- function(fit, items) {
   K = length(fit$pi)
+  pi_k = fit$pi
   d = map(seq_len(K), function(k)
-    tibble(segment = k, item = items,
+    tibble(segment = k, share = pi_k[k], item = items,
            m = map_dbl(fit$rho, function(r)
              (sum(seq_len(nrow(r)) * r[, k]) - 1) / (nrow(r) - 1)))) |>
     list_rbind() |>
     group_by(segment) |>
     mutate(level = mean(m)) |>
-    ungroup()
-  lev = distinct(d, segment, level)$level
-  tibble(sd_level = sd(lev), sd_pattern = sd(d$m - d$level)) |>
+    ungroup() |>
+    group_by(item) |>
+    mutate(item_mean = sum(share * m) / sum(share)) |>
+    ungroup() |>
+    mutate(grand = sum(share * level) / sum(share),
+           pattern = m - level - item_mean + grand)
+
+  wsd = function(x, wt) {
+    wt = wt / sum(wt)
+    sqrt(sum(wt * (x - sum(wt * x))^2))
+  }
+
+  lev = distinct(d, segment, share, level)
+  tibble(sd_level = wsd(lev$level, lev$share),
+         sd_pattern = wsd(d$pattern, d$share)) |>
     mutate(ratio = sd_pattern / sd_level)
 }
 
@@ -381,14 +510,44 @@ build_rep_design <- function(dat, cfg) {
 
   des = svydesign(ids = reformulate(cfg$psu), strata = reformulate(cfg$strata),
                    weights = reformulate(cfg$weight), data = dat, nest = TRUE)
-  list(des = des, rep_des = as.svrepdesign(des, type = "JKn"))
+
+  # mse = TRUE, explicitly. survey's default is
+  #   getOption("survey.replicates.mse"), which is FALSE, and svrVar() then
+  #   centres the replicate spread on the MEAN OF THE REPLICATES.
+  #   replicate_variance() below centres on the full-sample estimate, which is
+  #   the JKn formula the document states. Left at the default, the
+  #   design-based rows of the domain tables (svyby) and the corrected rows
+  #   (replicate_variance) come from two different variance estimators, and the
+  #   document compares their widths as though they were one. This changes
+  #   every standard error svyby produces.
+  list(des = des, rep_des = as.svrepdesign(des, type = "JKn", mse = TRUE))
 }
 
 # Same estimator survey::withReplicates uses,
 #    V = scale * sum_r rscale_r (theta_r - theta_hat)(theta_r - theta_hat)',
 #    but the expensive part (one refit per replicate) is mapped, not looped.
-replicate_variance <- function(rep_des, theta_fun, theta_hat) {
+# keep is a logical index into the rows of the FULL design. Restricting the
+#   replicate weights to those rows, rather than rebuilding the design on those
+#   rows, is the unconditional subpopulation approach: the replicate structure,
+#   the a_h / (a_h - 1) scaling and the degrees of freedom all stay those of the
+#   sample that was drawn. Rebuilding is the conditional approach, which drops
+#   any PSU that contributed no surviving respondent and changes all three.
+#   SURV701 states the rule -- subset the design, not the data.
+# Optional, so existing call sites are unaffected. Moving those call sites onto
+#   it is the remaining half of the change: build_rep_design() on the whole
+#   frame once, then pass keep here instead of a rebuilt design.
+replicate_variance <- function(rep_des, theta_fun, theta_hat, keep = NULL) {
   Wm = weights(rep_des, type = "analysis")
+
+  if (!is.null(keep)) {
+    if (length(keep) != nrow(Wm))
+      stop("The keep index has ", length(keep), " entries but the replicate ",
+           "weights have ", nrow(Wm), " rows. It must index the full design ",
+           "the replicate set was built on, not an already-subset frame.",
+           call. = FALSE)
+    Wm = Wm[keep, , drop = FALSE]
+  }
+
   Theta = do.call(rbind, future_map(seq_len(ncol(Wm)),
                                      function(r) theta_fun(Wm[, r]),
                                      .options = furrr_options(seed = NULL)))
@@ -403,6 +562,15 @@ replicate_variance <- function(rep_des, theta_fun, theta_hat) {
 #   replaced by row W of its inverse. 
 # Entries can come out negative, which is a property of the correction rather 
 # than a fault, and rows still sum to one because D's rows do.
+# How well conditioned D has to be before its inverse is worth anything. An
+#   exactly singular table stops the run because solve() refuses it; a
+#   near-singular one -- a segment that took very few assignments -- does not,
+#   and the correction it produces is unstable rather than wrong-looking. The
+#   reciprocal condition number is attached to every call so a caller can count
+#   the replicates that fell through this floor and disclose them, which is the
+#   only honest treatment available: there is nothing to repair.
+BCH_RCOND_MIN <- 1e-8
+
 bch_weights <- function(post, modal, w) {
   K = ncol(post)
   num = crossprod(w * post, outer(modal, seq_len(K), `==`) + 0)
@@ -413,7 +581,13 @@ bch_weights <- function(post, modal, w) {
          "inverse to apply. This happens when a segment takes no modal ",
          "assignments in a replicate, which is a sign the segment is too small ",
          "to survive deleting one PSU.", call. = FALSE)
-  Dinv[modal, , drop = FALSE]
+  rc = rcond(D)
+  if (rc < BCH_RCOND_MIN)
+    warning("The classification table is nearly singular (reciprocal condition ",
+            "number ", signif(rc, 3), "). The correction it produces is ",
+            "unstable. Count these and disclose them rather than reading the ",
+            "corrected column as though they had not happened.", call. = FALSE)
+  structure(Dinv[modal, , drop = FALSE], rcond = rc)
 }
 
 
